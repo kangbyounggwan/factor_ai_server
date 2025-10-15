@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Factor AI - 웹 클라이언트 예제</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+    }
+    .section {
+      margin-bottom: 30px;
+      padding: 20px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+    }
+    h2 {
+      margin-top: 0;
+    }
+    button {
+      background-color: #007bff;
+      color: white;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 10px;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+    input[type="file"] {
+      margin: 10px 0;
+    }
+    .result {
+      margin-top: 20px;
+      padding: 10px;
+      background-color: #f8f9fa;
+      border-radius: 4px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .error {
+      background-color: #f8d7da;
+      color: #721c24;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+    .success {
+      background-color: #d4edda;
+      color: #155724;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+    .loading {
+      color: #856404;
+      background-color: #fff3cd;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Factor AI API - 웹 클라이언트</h1>
+
+  <!-- 헬스 체크 -->
+  <div class="section">
+    <h2>1. 헬스 체크</h2>
+    <button onclick="checkHealth()">서버 상태 확인</button>
+    <div id="healthResult" class="result"></div>
+  </div>
+
+  <!-- 이미지 → 3D -->
+  <div class="section">
+    <h2>2. 이미지 → 3D 모델</h2>
+    <input type="file" id="imageFile" accept="image/*">
+    <br>
+    <button onclick="imageToThreeD()" id="imageBtn">3D 모델 생성</button>
+    <div id="imageResult" class="result"></div>
+  </div>
+
+  <!-- 텍스트 → 3D -->
+  <div class="section">
+    <h2>3. 텍스트 → 3D 모델</h2>
+    <input type="text" id="promptText" placeholder="설명 입력 (예: a cute robot)" style="width: 100%; padding: 8px;">
+    <br><br>
+    <button onclick="textToThreeD()" id="textBtn">3D 모델 생성</button>
+    <div id="textResult" class="result"></div>
+  </div>
+
+  <!-- Blender 후처리 -->
+  <div class="section">
+    <h2>4. Blender 후처리</h2>
+    <input type="text" id="taskIdInput" placeholder="Task ID 입력" style="width: 100%; padding: 8px;">
+    <br><br>
+    <button onclick="cleanModel()" id="cleanBtn">모델 정리 및 STL 변환</button>
+    <div id="cleanResult" class="result"></div>
+  </div>
+
+  <script>
+    const BASE_URL = 'http://localhost:7000';
+
+    // 헬스 체크
+    async function checkHealth() {
+      const resultDiv = document.getElementById('healthResult');
+      resultDiv.innerHTML = '<div class="loading">확인 중...</div>';
+
+      try {
+        const response = await fetch(`${BASE_URL}/health`);
+        const result = await response.json();
+
+        if (result.status === 'ok') {
+          resultDiv.innerHTML = `<div class="success">서버 정상 작동 중</div><pre>${JSON.stringify(result, null, 2)}</pre>`;
+        } else {
+          resultDiv.innerHTML = `<div class="error">에러: ${result.error}</div>`;
+        }
+      } catch (error) {
+        resultDiv.innerHTML = `<div class="error">네트워크 에러: ${error.message}</div>`;
+      }
+    }
+
+    // 이미지 → 3D
+    async function imageToThreeD() {
+      const fileInput = document.getElementById('imageFile');
+      const resultDiv = document.getElementById('imageResult');
+      const btn = document.getElementById('imageBtn');
+
+      if (!fileInput.files.length) {
+        resultDiv.innerHTML = '<div class="error">이미지 파일을 선택하세요.</div>';
+        return;
+      }
+
+      btn.disabled = true;
+      resultDiv.innerHTML = '<div class="loading">3D 모델 생성 중... (최대 20분 소요)</div>';
+
+      try {
+        const formData = new FormData();
+        formData.append('task', 'image_to_3d');
+        formData.append('image_file', fileInput.files[0]);
+        formData.append('json', '{}');
+
+        const response = await fetch(`${BASE_URL}/v1/process/modelling`, {
+          method: 'POST',
+          body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.status === 'ok') {
+          const downloadUrl = `${BASE_URL}${result.data.download_url}`;
+          resultDiv.innerHTML = `
+            <div class="success">✅ 3D 모델 생성 완료!</div>
+            <p><strong>Task ID:</strong> ${result.data.task_id}</p>
+            <p><a href="${downloadUrl}" download>📥 GLB 파일 다운로드</a></p>
+            <pre>${JSON.stringify(result.data, null, 2)}</pre>
+          `;
+        } else {
+          resultDiv.innerHTML = `<div class="error">에러: ${result.error}</div>`;
+        }
+      } catch (error) {
+        resultDiv.innerHTML = `<div class="error">에러: ${error.message}</div>`;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // 텍스트 → 3D
+    async function textToThreeD() {
+      const promptInput = document.getElementById('promptText');
+      const resultDiv = document.getElementById('textResult');
+      const btn = document.getElementById('textBtn');
+
+      if (!promptInput.value.trim()) {
+        resultDiv.innerHTML = '<div class="error">텍스트를 입력하세요.</div>';
+        return;
+      }
+
+      btn.disabled = true;
+      resultDiv.innerHTML = '<div class="loading">3D 모델 생성 시작 중...</div>';
+
+      try {
+        // 1. 작업 시작
+        const response = await fetch(`${BASE_URL}/v1/process/modelling`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            task: 'text_to_3d',
+            prompt: promptInput.value,
+            model: 'flux-kontext',
+            quality: 'medium',
+            output: { format: 'glb', unit: 'mm', scale: 1.0 },
+            printer: { device_uuid: 'web-client', auto_slice: false, print: false },
+            metadata: { session_id: 'web', source: 'web', user_id: 'web-user' }
+          })
+        });
+
+        const result = await response.json();
+
+        if (result.status !== 'ok') {
+          resultDiv.innerHTML = `<div class="error">에러: ${result.error}</div>`;
+          btn.disabled = false;
+          return;
+        }
+
+        const taskId = result.data.task_id;
+        resultDiv.innerHTML = `<div class="loading">Task ID: ${taskId}<br>완료까지 대기 중... (최대 20분)</div>`;
+
+        // 2. 폴링
+        let completed = false;
+        let attempts = 0;
+        const maxAttempts = 240; // 20분 (5초 * 240)
+
+        while (!completed && attempts < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          attempts++;
+
+          const statusResponse = await fetch(`${BASE_URL}/v1/process/modelling/${taskId}`);
+          const statusResult = await statusResponse.json();
+
+          if (statusResult.status === 'ok') {
+            const status = statusResult.data.status;
+            const progress = statusResult.data.progress || 0;
+
+            resultDiv.innerHTML = `<div class="loading">Status: ${status}<br>Progress: ${progress}%<br>경과 시간: ${attempts * 5}초</div>`;
+
+            if (status === 'SUCCEEDED') {
+              completed = true;
+              const downloadUrl = `${BASE_URL}${statusResult.data.download_url}`;
+              resultDiv.innerHTML = `
+                <div class="success">✅ 3D 모델 생성 완료!</div>
+                <p><strong>Task ID:</strong> ${taskId}</p>
+                <p><a href="${downloadUrl}" download>📥 GLB 파일 다운로드</a></p>
+                <pre>${JSON.stringify(statusResult.data, null, 2)}</pre>
+              `;
+            } else if (status === 'FAILED') {
+              resultDiv.innerHTML = `<div class="error">작업 실패</div>`;
+              break;
+            }
+          }
+        }
+
+        if (!completed) {
+          resultDiv.innerHTML = `<div class="error">타임아웃: 20분 경과</div>`;
+        }
+      } catch (error) {
+        resultDiv.innerHTML = `<div class="error">에러: ${error.message}</div>`;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Blender 후처리
+    async function cleanModel() {
+      const taskIdInput = document.getElementById('taskIdInput');
+      const resultDiv = document.getElementById('cleanResult');
+      const btn = document.getElementById('cleanBtn');
+
+      if (!taskIdInput.value.trim()) {
+        resultDiv.innerHTML = '<div class="error">Task ID를 입력하세요.</div>';
+        return;
+      }
+
+      btn.disabled = true;
+      resultDiv.innerHTML = '<div class="loading">Blender 후처리 중...</div>';
+
+      try {
+        const response = await fetch(`${BASE_URL}/v1/process/clean-model`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: taskIdInput.value })
+        });
+
+        const result = await response.json();
+
+        if (result.status === 'ok') {
+          const glbUrl = `${BASE_URL}${result.data.cleaned_glb_url}`;
+          const stlUrl = `${BASE_URL}${result.data.stl_url}`;
+
+          resultDiv.innerHTML = `
+            <div class="success">✅ Blender 후처리 완료!</div>
+            <p><a href="${glbUrl}" download>📥 정리된 GLB 다운로드</a></p>
+            <p><a href="${stlUrl}" download>📥 STL 파일 다운로드</a></p>
+            <pre>${JSON.stringify(result.data, null, 2)}</pre>
+          `;
+        } else {
+          resultDiv.innerHTML = `<div class="error">에러: ${result.error}</div>`;
+        }
+      } catch (error) {
+        resultDiv.innerHTML = `<div class="error">에러: ${error.message}</div>`;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
