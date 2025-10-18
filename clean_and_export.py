@@ -1,5 +1,5 @@
 
-import bpy, os, sys, traceback, math
+import bpy, os, sys, traceback
 from mathutils import Vector
 
 def log(msg):
@@ -43,61 +43,34 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
         # Apply transforms
         bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
 
-        # 📐 Get model dimensions for calculations
+        # Get model dimensions
         bb = obj.dimensions
-        base_size = max(bb.x, bb.y, bb.z)
-        total_bbox_vol = float(bb.x * bb.y * bb.z)
-        log(f"Model dimensions: {bb.x:.2f} x {bb.y:.2f} x {bb.z:.2f} (base={base_size:.2f})")
+        log(f"Model dimensions: {bb.x:.2f} x {bb.y:.2f} x {bb.z:.2f}")
 
-        # ========== 3D PRINTING OPTIMIZATION START ==========
+        # ========== BASIC CLEANING (MINIMAL PROCESSING) ==========
 
-        # 1) Weld - 중복 버텍스 병합
-        log("[1/10] Welding duplicate vertices...")
+        # 1) Weld - 중복 버텍스 병합 (기본 정리)
+        log("[1/4] Welding duplicate vertices...")
         weld = obj.modifiers.new("Weld","WELD")
         weld.merge_threshold = 0.0008
         bpy.ops.object.modifier_apply(modifier=weld.name)
 
-        # 2) Fix non-manifold - 구멍 메우기 및 노멀 통일
-        log("[2/10] Fixing non-manifold geometry...")
+        # 2) Fix non-manifold - 기본 수정만 (구멍 메우기, 노멀 통일)
+        log("[2/4] Fixing non-manifold geometry...")
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_all(action='DESELECT')
         try:
             bpy.ops.mesh.select_non_manifold()
-            bpy.ops.mesh.fill_holes(sides=0)  # 모든 구멍 메우기
+            bpy.ops.mesh.fill_holes(sides=0)
         except Exception as _:
             pass
         bpy.ops.mesh.select_all(action='SELECT')
         bpy.ops.mesh.normals_make_consistent(inside=False)
-        bpy.ops.mesh.remove_doubles(threshold=0.0001)  # 중복 제거
+        bpy.ops.mesh.remove_doubles(threshold=0.0001)
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        # 3) Decimate - 불필요한 디테일 제거 (3D 프린터 해상도에 맞게)
-        log(f"[3/10] Decimating mesh (ratio={decimate_ratio})...")
-        decimate = obj.modifiers.new("Decimate", "DECIMATE")
-        decimate.ratio = decimate_ratio
-        decimate.use_collapse_triangulate = True
-        bpy.ops.object.modifier_apply(modifier=decimate.name)
-
-        # 4) Voxel Remesh - 균일한 메시 재구성
-        log("[4/10] Voxel remeshing...")
-        voxel = max(base_size/200.0, 0.0005)
-        rm = obj.modifiers.new("Remesh","REMESH")
-        rm.mode = 'VOXEL'
-        rm.voxel_size = voxel
-        rm.use_remove_disconnected = True
-        rm.use_smooth_shade = True
-        bpy.ops.object.modifier_apply(modifier=rm.name)
-
-        # 5) 다시 한번 Non-manifold 수정 (Remesh 후 발생 가능)
-        log("[5/10] Second manifold check...")
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='SELECT')
-        bpy.ops.mesh.fill_holes(sides=0)
-        bpy.ops.mesh.normals_make_consistent(inside=False)
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        # 6) Separate loose parts - 분리된 파트 검출
-        log("[6/10] Separating loose parts...")
+        # 3) Separate and remove only very small loose parts (optional)
+        log("[3/4] Removing very small loose parts...")
         bpy.ops.object.mode_set(mode='EDIT')
         try:
             bpy.ops.mesh.select_all(action='SELECT')
@@ -107,21 +80,10 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.context.view_layer.update()
 
-        # 7) 작은 파트 및 내부 파트 제거 (비율 기반 + 절대값 기반)
-        log("[7/10] Removing small and internal parts...")
+        # Remove only extremely small parts (very strict threshold)
         depsgraph = bpy.context.evaluated_depsgraph_get()
         to_delete = []
         parts = [o for o in bpy.context.scene.objects if o.type == 'MESH']
-
-        # 가장 큰 파트 찾기
-        max_vol = 0.0
-        for o in parts:
-            try:
-                vol = float(o.dimensions.x * o.dimensions.y * o.dimensions.z)
-                if vol > max_vol:
-                    max_vol = vol
-            except:
-                continue
 
         for o in parts:
             try:
@@ -133,20 +95,10 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
             except ReferenceError:
                 continue
 
-            # 제거 조건:
-            # 1. 버텍스 수가 너무 적음
-            # 2. 볼륨이 너무 작음
-            # 3. 가장 큰 파트 대비 비율이 작음 (내부 파트 제거)
-            vol_ratio = vol / max_vol if max_vol > 0 else 0
-            should_remove = (
-                vcount < min_verts or
-                vol < min_bbox_vol or
-                vol_ratio < max_part_ratio
-            )
-
-            if should_remove:
+            # 매우 작은 파트만 제거 (기본 임계값의 1/10)
+            if vcount < min_verts // 10 or vol < min_bbox_vol:
                 to_delete.append(o)
-                log(f"  - Remove: verts={vcount}, vol={vol:.6f}, ratio={vol_ratio:.3f}")
+                log(f"  - Remove tiny part: verts={vcount}, vol={vol:.6f}")
 
         if to_delete:
             bpy.ops.object.select_all(action='DESELECT')
@@ -154,11 +106,11 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
                 if o.name in bpy.context.scene.objects:
                     o.select_set(True)
             bpy.ops.object.delete()
-        log(f"Removed {len(to_delete)} parts (small/internal)")
+        log(f"Removed {len(to_delete)} tiny parts")
         bpy.context.view_layer.update()
 
-        # 8) Join remaining parts
-        log("[8/10] Joining parts...")
+        # 4) Join remaining parts
+        log("[4/4] Joining remaining parts...")
         parts=[o for o in bpy.context.scene.objects if o.type=='MESH']
         if not parts:
             raise RuntimeError("No mesh after cleaning")
@@ -169,55 +121,7 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
             bpy.ops.object.join()
         obj = bpy.context.view_layer.objects.active
 
-        # 9) Solidify - 벽 두께 강제 (얇은 벽 보강)
-        log(f"[9/10] Solidifying walls (thickness={solidify_thickness})...")
-        try:
-            solidify = obj.modifiers.new("Solidify", "SOLIDIFY")
-            solidify.thickness = solidify_thickness
-            solidify.offset = 0  # 중앙
-            solidify.use_even_offset = True
-            solidify.use_quality_normals = True
-            bpy.ops.object.modifier_apply(modifier=solidify.name)
-        except Exception as e:
-            log(f"  Warning: Solidify failed: {e}")
-
-        # 10) 바닥 평탄화 및 최적 방향 (선택적)
-        log("[10/10] Optimizing orientation for 3D printing...")
-        if auto_orient:
-            # Z축 바닥으로 이동
-            bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
-            minz = min([v.co.z for v in obj.data.vertices])
-            if minz != 0:
-                obj.location.z -= minz
-                bpy.ops.object.transform_apply(location=True, rotation=False, scale=False)
-
-            # 바닥 면적 최대화 (안정성)
-            # X, Y, Z 축으로 회전해보고 바닥 면적이 가장 큰 방향 선택
-            best_rotation = (0, 0, 0)
-            max_base_area = 0
-
-            for rot_x in [0, 90, -90]:
-                for rot_y in [0, 90, -90]:
-                    obj.rotation_euler = (math.radians(rot_x), math.radians(rot_y), 0)
-                    bpy.context.view_layer.update()
-                    bb = obj.dimensions
-                    base_area = bb.x * bb.y
-                    if base_area > max_base_area:
-                        max_base_area = base_area
-                        best_rotation = (rot_x, rot_y, 0)
-
-            obj.rotation_euler = (math.radians(best_rotation[0]), math.radians(best_rotation[1]), 0)
-            bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
-
-            # 다시 바닥으로
-            minz = min([v.co.z for v in obj.data.vertices])
-            if minz != 0:
-                obj.location.z -= minz
-                bpy.ops.object.transform_apply(location=True, rotation=False, scale=False)
-
-            log(f"  Optimized orientation: base area={max_base_area:.2f}")
-
-        # 마지막 스무딩
+        # Apply smooth shading
         bpy.ops.object.shade_smooth()
 
         # 최종 통계
@@ -225,7 +129,7 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
         final_faces = len(obj.data.polygons)
         log(f"Final mesh: {final_verts} vertices, {final_faces} faces")
 
-        # ========== 3D PRINTING OPTIMIZATION END ==========
+        # ========== BASIC CLEANING END ==========
 
         # Export as GLB
         bpy.ops.export_scene.gltf(filepath=out_glb, export_format='GLB', use_selection=False)
