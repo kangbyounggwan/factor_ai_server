@@ -46,7 +46,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/files", StaticFiles(directory=os.getenv("OUTPUT_DIR", "./output")), name="files")
+# Note: /files endpoint is now handled by custom download_file_with_tracking()
+# to support auto-deletion after download
+# app.mount("/files", StaticFiles(directory=os.getenv("OUTPUT_DIR", "./output")), name="files")
 
 
 class ApiResponse(BaseModel):
@@ -368,6 +370,11 @@ class GenerateGCodeRequest(BaseModel):
     stl_path: Optional[str] = None
     task_id: Optional[str] = None
     cura_settings: Optional[dict] = None
+    printer_definition: Optional[dict] = None  # 프린터 정의 JSON (클라이언트가 전송)
+
+
+# 파일 다운로드 추적용
+downloaded_files = set()  # 다운로드 완료된 파일 경로 저장
 
 
 @app.post("/v1/process/clean-model", response_model=ApiResponse)
@@ -463,11 +470,14 @@ async def generate_gcode(payload: GenerateGCodeRequest):
 
     Optional:
     - cura_settings: Custom Cura settings dict (e.g., {"layer_height": "0.2", "infill_sparse_density": "20"})
+    - printer_definition: Printer definition JSON (entire .def.json content sent by client)
+                         If not provided, uses default from CURA_DEFINITION_JSON env variable
     """
     try:
-        from cura_processor import convert_stl_to_gcode, is_curaengine_available
+        from cura_processor import convert_stl_to_gcode, convert_stl_to_gcode_with_definition, is_curaengine_available
 
-        if not is_curaengine_available():
+        # printer_definition이 없으면 기본 체크, 있으면 CuraEngine만 체크
+        if not payload.printer_definition and not is_curaengine_available():
             raise HTTPException(
                 status_code=503,
                 detail="CuraEngine is not available (not configured or not installed)"
@@ -501,17 +511,29 @@ async def generate_gcode(payload: GenerateGCodeRequest):
             )
 
         logger.info("[GenerateGCode] Processing: %s (task_id=%s)", stl_path, task_id)
+        if payload.printer_definition:
+            logger.info("[GenerateGCode] Using client-provided printer definition")
 
         # Prepare output path
         output_dir = os.getenv("OUTPUT_DIR", "./output")
         gcode_path = os.path.join(output_dir, f"cleaned_{task_id}.gcode")
 
-        # Run CuraEngine
-        success = await convert_stl_to_gcode(
-            stl_path=os.path.abspath(stl_path),
-            gcode_path=os.path.abspath(gcode_path),
-            custom_settings=payload.cura_settings,
-        )
+        # Run CuraEngine with printer definition from client or default
+        if payload.printer_definition:
+            # 클라이언트가 프린터 정의를 보낸 경우
+            success = await convert_stl_to_gcode_with_definition(
+                stl_path=os.path.abspath(stl_path),
+                gcode_path=os.path.abspath(gcode_path),
+                printer_definition=payload.printer_definition,
+                custom_settings=payload.cura_settings,
+            )
+        else:
+            # 기본 환경 변수 프린터 정의 사용
+            success = await convert_stl_to_gcode(
+                stl_path=os.path.abspath(stl_path),
+                gcode_path=os.path.abspath(gcode_path),
+                custom_settings=payload.cura_settings,
+            )
 
         if not success:
             raise RuntimeError("G-code generation failed")
@@ -540,6 +562,278 @@ async def generate_gcode(payload: GenerateGCodeRequest):
     except Exception as e:
         logger.exception("[GenerateGCode] Unexpected error: %s", e)
         raise HTTPException(status_code=500, detail="G-code generation failed")
+
+
+@app.post("/v1/process/upload-stl-and-slice", response_model=ApiResponse)
+async def upload_stl_and_slice(
+    model_file: UploadFile = File(...),
+    cura_settings_json: str = Form("{}"),
+    printer_definition_json: str = Form(None),
+):
+    """
+    3D 모델 파일을 업로드하고 즉시 G-code로 슬라이싱합니다.
+
+    지원 파일 형식: STL, GLB, GLTF, OBJ
+    - GLB/GLTF/OBJ 파일은 자동으로 STL로 변환됩니다.
+
+    Form-data 필드:
+    - model_file: 3D 모델 파일 (필수) - STL, GLB, GLTF, OBJ
+    - cura_settings_json: Cura 설정 JSON 문자열 (선택)
+    - printer_definition_json: 프린터 정의 JSON 문자열 (선택)
+    """
+    try:
+        from cura_processor import convert_stl_to_gcode, convert_stl_to_gcode_with_definition
+
+        # 출력 디렉토리 준비
+        output_dir = os.getenv("OUTPUT_DIR", "./output")
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 파일명 및 확장자 추출
+        timestamp = int(time.time())
+        original_filename = getattr(model_file, "filename", "model.stl")
+        name_root, file_ext = os.path.splitext(original_filename)
+        file_ext = file_ext.lower()
+
+        logger.info("[Upload] Received file: %s (type: %s)", original_filename, file_ext)
+
+        # 파일 저장
+        file_bytes = await model_file.read()
+        temp_filename = f"uploaded_{name_root}_{timestamp}{file_ext}"
+        temp_path = os.path.join(output_dir, temp_filename)
+
+        with open(temp_path, "wb") as f:
+            f.write(file_bytes)
+
+        logger.info("[Upload] Saved: %s (%d bytes)", temp_path, len(file_bytes))
+
+        # STL 변환 (필요한 경우)
+        stl_filename = f"uploaded_{name_root}_{timestamp}.stl"
+        stl_path = os.path.join(output_dir, stl_filename)
+
+        if file_ext == ".stl":
+            # 이미 STL이면 그대로 사용
+            if temp_path != stl_path:
+                import shutil
+                shutil.move(temp_path, stl_path)
+            logger.info("[Upload] STL file, no conversion needed")
+
+        elif file_ext in [".glb", ".gltf", ".obj"]:
+            # GLB/GLTF/OBJ → STL 변환
+            logger.info("[Upload] Converting %s to STL...", file_ext)
+
+            try:
+                import trimesh
+
+                # 파일 로드
+                if file_ext == ".glb":
+                    mesh = trimesh.load(temp_path, file_type='glb')
+                elif file_ext == ".gltf":
+                    mesh = trimesh.load(temp_path, file_type='gltf')
+                elif file_ext == ".obj":
+                    mesh = trimesh.load(temp_path, file_type='obj')
+
+                # 여러 메시가 있으면 병합
+                if hasattr(mesh, "geometry"):
+                    mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
+
+                logger.info("[Upload] Loaded mesh: %d vertices, %d faces",
+                           len(mesh.vertices), len(mesh.faces))
+
+                # 기본 수리
+                trimesh.repair.fix_inversion(mesh)
+                trimesh.repair.fill_holes(mesh)
+                mesh.remove_degenerate_faces()
+                mesh.remove_duplicate_faces()
+                mesh.remove_unreferenced_vertices()
+
+                # STL로 내보내기
+                mesh.export(stl_path, file_type='stl')
+
+                # 원본 파일 삭제
+                os.remove(temp_path)
+
+                logger.info("[Upload] Converted to STL: %s", stl_path)
+
+            except ImportError:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Trimesh library not available for file conversion"
+                )
+            except Exception as e:
+                logger.error("[Upload] Conversion failed: %s", str(e))
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to convert {file_ext} to STL: {str(e)}"
+                )
+        else:
+            # 지원하지 않는 형식
+            os.remove(temp_path)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file format: {file_ext}. Supported: .stl, .glb, .gltf, .obj"
+            )
+
+        # STL 파일 크기 확인
+        stl_size = os.path.getsize(stl_path)
+        logger.info("[Upload] Final STL: %s (%d bytes)", stl_path, stl_size)
+
+        # G-code 출력 경로
+        gcode_filename = f"uploaded_{name_root}_{timestamp}.gcode"
+        gcode_path = os.path.join(output_dir, gcode_filename)
+
+        # Cura 설정 파싱
+        try:
+            cura_settings = json.loads(cura_settings_json) if cura_settings_json else {}
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid cura_settings_json format")
+
+        # 프린터 정의 파싱
+        printer_definition = None
+        if printer_definition_json:
+            try:
+                printer_definition = json.loads(printer_definition_json)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid printer_definition_json format")
+
+        # 슬라이싱 실행
+        if printer_definition:
+            logger.info("[UploadSTL] Using client-provided printer definition")
+            success = await convert_stl_to_gcode_with_definition(
+                stl_path=os.path.abspath(stl_path),
+                gcode_path=os.path.abspath(gcode_path),
+                printer_definition=printer_definition,
+                custom_settings=cura_settings,
+            )
+        else:
+            from cura_processor import is_curaengine_available
+            if not is_curaengine_available():
+                raise HTTPException(status_code=503, detail="CuraEngine not available")
+
+            success = await convert_stl_to_gcode(
+                stl_path=os.path.abspath(stl_path),
+                gcode_path=os.path.abspath(gcode_path),
+                custom_settings=cura_settings,
+            )
+
+        if not success:
+            raise RuntimeError("Slicing failed")
+
+        # 파일 정리 (최신 50개만 유지)
+        cleanup_old_files(output_dir, max_files=50)
+
+        # 응답 데이터
+        response_data = {
+            "original_filename": original_filename,
+            "original_format": file_ext,
+            "converted_to_stl": file_ext != ".stl",
+            "stl_filename": stl_filename,
+            "stl_path": stl_path,
+            "stl_url": f"{PUBLIC_BASE_URL}/files/{stl_filename}",
+            "gcode_filename": gcode_filename,
+            "gcode_path": gcode_path,
+            "gcode_url": f"{PUBLIC_BASE_URL}/files/{gcode_filename}",
+            "file_size": {
+                "stl_bytes": stl_size,
+                "gcode_bytes": os.path.getsize(gcode_path) if os.path.exists(gcode_path) else 0,
+            },
+        }
+
+        if cura_settings:
+            response_data["cura_settings"] = cura_settings
+
+        logger.info("[Upload] Success: %s (format: %s)", gcode_filename, file_ext)
+        return ApiResponse(status="ok", data=response_data)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[UploadSTL] Failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/files/{filename}")
+async def download_file_with_tracking(filename: str):
+    """
+    파일 다운로드 (다운로드 완료 시 자동 삭제)
+
+    파일을 전송한 후 downloaded_files에 추가하여 추적합니다.
+    """
+    from fastapi.responses import FileResponse
+
+    output_dir = os.getenv("OUTPUT_DIR", "./output")
+    file_path = os.path.join(output_dir, filename)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # 파일 전송 후 삭제 마킹
+    logger.info("[Download] File requested: %s", filename)
+
+    # 파일 응답 (다운로드 완료 후 background task로 삭제)
+    from fastapi import BackgroundTasks
+
+    async def mark_for_deletion():
+        """다운로드 완료 후 파일 삭제"""
+        import asyncio
+        await asyncio.sleep(2)  # 다운로드 완료 대기
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info("[Download] Deleted after download: %s", filename)
+        except Exception as e:
+            logger.warning("[Download] Failed to delete: %s - %s", filename, e)
+
+    background_tasks = BackgroundTasks()
+    background_tasks.add_task(mark_for_deletion)
+
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        background=background_tasks,
+    )
+
+
+def cleanup_old_files(directory: str, max_files: int = 50):
+    """
+    디렉토리에서 오래된 파일을 삭제하여 최신 N개만 유지합니다.
+
+    Args:
+        directory: 정리할 디렉토리
+        max_files: 유지할 최대 파일 개수
+    """
+    try:
+        import glob
+        from pathlib import Path
+
+        # 모든 파일 목록 (숨김 파일 제외)
+        all_files = []
+        for pattern in ["*.stl", "*.gcode", "*.glb", "*.jpg", "*.png"]:
+            all_files.extend(glob.glob(os.path.join(directory, pattern)))
+
+        # 파일이 max_files 이하면 정리 불필요
+        if len(all_files) <= max_files:
+            return
+
+        # 수정 시간 기준 정렬 (오래된 것부터)
+        all_files.sort(key=lambda f: os.path.getmtime(f))
+
+        # 삭제할 파일 개수
+        files_to_delete = len(all_files) - max_files
+
+        if files_to_delete > 0:
+            logger.info("[Cleanup] Total files: %d, deleting oldest %d files", len(all_files), files_to_delete)
+
+            for file_path in all_files[:files_to_delete]:
+                try:
+                    os.remove(file_path)
+                    logger.info("[Cleanup] Deleted: %s", os.path.basename(file_path))
+                except Exception as e:
+                    logger.warning("[Cleanup] Failed to delete %s: %s", file_path, e)
+
+            logger.info("[Cleanup] Completed. Remaining files: %d", max_files)
+
+    except Exception as e:
+        logger.error("[Cleanup] Error during cleanup: %s", e)
 
 
 if __name__ == "__main__":
