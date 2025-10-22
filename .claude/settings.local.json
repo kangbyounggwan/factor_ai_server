@@ -4,7 +4,10 @@
       "Bash(python:*)",
       "Bash(C:UsersUSERanaconda3python.exe parse_cura_printers.py)",
       "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\":*)",
-      "Read(//c/Users/USER/FACTOR HIBRID/FACTOR-HIBRID-r1.0/packages/web/**)"
+      "Read(//c/Users/USER/FACTOR HIBRID/FACTOR-HIBRID-r1.0/packages/web/**)",
+      "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\" test_cura.py)",
+      "Bash(del /Q test_cura.py test_upload_stl.py test_auto_convert.py)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
