@@ -213,10 +213,15 @@ async def run_curaengine_process(
 
         def run_subprocess():
             try:
+                # CuraEngine을 Cura resources 디렉토리에서 실행
+                # 이렇게 하면 extruders/, definitions/ 등을 상대 경로로 찾을 수 있음
+                cura_resources_dir = Path(CURAENGINE_PATH).parent / "share" / "cura" / "resources"
+
                 process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
+                    cwd=str(cura_resources_dir) if cura_resources_dir.exists() else None,
                 )
                 stdout, _ = process.communicate(timeout=CURA_TIMEOUT)
                 return process.returncode, stdout
@@ -386,6 +391,62 @@ async def convert_stl_to_gcode(
             CURA_DEFINITION_JSON = original_def
 
 
+async def convert_stl_to_gcode_with_printer_name(
+    stl_path: str,
+    gcode_path: str,
+    printer_name: str,
+    custom_settings: Optional[Dict[str, str]] = None,
+) -> bool:
+    """
+    Convert STL to G-code using printer name from Cura definitions directory.
+
+    Args:
+        stl_path: Path to input STL file
+        gcode_path: Path to output G-code file
+        printer_name: Printer def file name (e.g., 'creality_ender3pro')
+        custom_settings: Optional dict of Cura setting overrides
+
+    Returns:
+        bool: True if slicing succeeded, False otherwise
+    """
+    # Cura definitions directory
+    # CURAENGINE_PATH = C:\Program Files\UltiMaker Cura 5.7.1\CuraEngine.exe
+    # definitions_dir = C:\Program Files\UltiMaker Cura 5.7.1\share\cura\resources\definitions
+    curaengine_path = Path(os.getenv("CURAENGINE_PATH", ""))
+    cura_root = curaengine_path.parent  # C:\Program Files\UltiMaker Cura 5.7.1
+    definitions_dir = cura_root / "share" / "cura" / "resources" / "definitions"
+
+    # Find printer def file (remove .def if already in printer_name)
+    if printer_name.endswith(".def"):
+        printer_name = printer_name[:-4]  # Remove '.def'
+
+    printer_def_path = definitions_dir / f"{printer_name}.def.json"
+
+    if not printer_def_path.exists():
+        logger.error("[Cura] Printer definition not found: %s", printer_def_path)
+        return False
+
+    logger.info("[Cura] Using printer definition: %s", printer_name)
+    logger.info("[Cura] Def file path: %s", printer_def_path)
+
+    # Temporarily override CURA_DEFINITION_JSON
+    global CURA_DEFINITION_JSON
+    original_def = CURA_DEFINITION_JSON
+    CURA_DEFINITION_JSON = str(printer_def_path)
+
+    try:
+        # Use convert_stl_to_gcode which will use the overridden def path
+        result = await convert_stl_to_gcode(
+            stl_path=stl_path,
+            gcode_path=gcode_path,
+            custom_settings=custom_settings,
+        )
+        return result
+    finally:
+        # Restore original definition
+        CURA_DEFINITION_JSON = original_def
+
+
 async def convert_stl_to_gcode_with_definition(
     stl_path: str,
     gcode_path: str,
@@ -394,6 +455,9 @@ async def convert_stl_to_gcode_with_definition(
 ) -> bool:
     """
     Convert STL to G-code using printer definition JSON sent by client.
+
+    이 함수는 현재 복잡한 프린터 정의 상속 문제로 인해 항상 실패합니다.
+    대신 main.py의 fallback 로직이 작동하여 fdmprinter + bed size로 재시도합니다.
 
     Args:
         stl_path: Absolute path to input STL file
@@ -404,33 +468,82 @@ async def convert_stl_to_gcode_with_definition(
     Returns:
         bool: Success status
     """
-    if not CURAENGINE_PATH or not Path(CURAENGINE_PATH).exists():
-        raise RuntimeError("CuraEngine not found")
+    logger.warning("[Cura] convert_stl_to_gcode_with_definition() called - will raise exception for fallback")
+    logger.info("[Cura] Printer definition keys: %s", list(printer_definition.keys()))
 
-    stl_file = Path(stl_path)
-    gcode_file = Path(gcode_path)
+    # 이 함수는 의도적으로 실패하여 fallback이 작동하도록 함
+    raise RuntimeError("Custom printer definition not supported - use fallback to fdmprinter + bed size")
 
-    if not stl_file.exists():
-        raise RuntimeError(f"Input STL file not found: {stl_path}")
-
-    # Write printer definition to temporary file
+    # Write printer definition to temporary file in Cura definitions directory
+    # This allows CuraEngine to resolve inheritance
     import tempfile
     import json
+    import shutil
 
+    # Get Cura definitions directory
+    curaengine_path = Path(os.getenv("CURAENGINE_PATH", ""))
+    cura_root = curaengine_path.parent
+    definitions_dir = cura_root / "share" / "cura" / "resources" / "definitions"
+
+    if not definitions_dir.exists():
+        raise RuntimeError(f"Cura definitions directory not found: {definitions_dir}")
+
+    # Create temp file in definitions directory so inheritance works
     temp_def_file = tempfile.NamedTemporaryFile(
         mode='w',
         suffix='.def.json',
         delete=False,
-        dir=OUTPUT_DIR
+        dir=definitions_dir,  # 중요: definitions 디렉토리에 생성
+        prefix='temp_client_'
     )
 
     try:
+        # 전략: fdmprinter를 base로 사용하고 클라이언트 overrides 적용
+        # CuraEngine은 상속을 지원하므로 클라이언트 정의가 fdmprinter를 상속하도록 함
+
+        # 클라이언트가 overrides만 보낸 경우 -> 완전한 정의로 변환
+        client_overrides = {}
+
+        if 'overrides' in printer_definition:
+            logger.info("[Cura] Client provided %d overrides", len(printer_definition['overrides']))
+            client_overrides = printer_definition['overrides']
+
+        # 클라이언트가 settings를 보낸 경우도 overrides로 처리
+        if 'settings' in printer_definition and printer_definition['settings']:
+            logger.info("[Cura] Client provided %d settings", len(printer_definition['settings']))
+            # settings를 overrides 형식으로 변환
+            for key, value in printer_definition['settings'].items():
+                if isinstance(value, dict) and 'default_value' in value:
+                    client_overrides[key] = value
+                else:
+                    # 값만 제공된 경우 default_value 형식으로 변환
+                    client_overrides[key] = {'default_value': value}
+
+        # fdmprinter를 상속하는 새 정의 생성
+        custom_definition = {
+            "version": 2,
+            "name": printer_definition.get('name', 'Custom Printer'),
+            "inherits": "fdmprinter",  # CuraEngine이 같은 디렉토리에서 fdmprinter 찾음
+            "metadata": {
+                "visible": True,
+                "type": "machine"
+            },
+            "overrides": client_overrides
+        }
+
+        # 메타데이터 병합
+        if 'metadata' in printer_definition:
+            custom_definition['metadata'].update(printer_definition['metadata'])
+
+        logger.info("[Cura] Created definition inheriting from fdmprinter with %d overrides",
+                   len(client_overrides))
+
         # Write definition JSON
-        json.dump(printer_definition, temp_def_file, indent=2)
+        json.dump(custom_definition, temp_def_file, indent=2)
         temp_def_file.close()
         definition_path = temp_def_file.name
 
-        logger.info("[Cura] Created temporary printer definition: %s", definition_path)
+        logger.info("[Cura] Created temporary printer definition in Cura directory: %s", definition_path)
 
         # Merge settings
         settings = merge_settings(custom_settings)

@@ -566,8 +566,9 @@ async def generate_gcode(payload: GenerateGCodeRequest):
 
 @app.post("/v1/process/upload-stl-and-slice", response_model=ApiResponse)
 async def upload_stl_and_slice(
-    model_file: UploadFile = File(...),
+    model_file: UploadFile = File(...),  # 3D 모델 파일 (STL, GLB, GLTF, OBJ)
     cura_settings_json: str = Form("{}"),
+    printer_name: str = Form(None),
     printer_definition_json: str = Form(None),
 ):
     """
@@ -579,10 +580,22 @@ async def upload_stl_and_slice(
     Form-data 필드:
     - model_file: 3D 모델 파일 (필수) - STL, GLB, GLTF, OBJ
     - cura_settings_json: Cura 설정 JSON 문자열 (선택)
-    - printer_definition_json: 프린터 정의 JSON 문자열 (선택)
+    - printer_name: 프린터 이름 (선택, 권장) - DB의 filename에서 .def.json 제거한 값
+                   예: "elegoo_neptune_x", "creality_ender3pro"
+    - printer_definition_json: 프린터 정의 JSON 문자열 (선택, 고급)
+
+    우선순위: printer_name > printer_definition_json > 기본 프린터
     """
     try:
-        from cura_processor import convert_stl_to_gcode, convert_stl_to_gcode_with_definition
+        logger.info("="*80)
+        logger.info("[UploadSTL] ===== NEW REQUEST =====")
+        logger.info("[UploadSTL] Received upload-stl-and-slice request")
+
+        from cura_processor import (
+            convert_stl_to_gcode,
+            convert_stl_to_gcode_with_definition,
+            convert_stl_to_gcode_with_printer_name
+        )
 
         # 출력 디렉토리 준비
         output_dir = os.getenv("OUTPUT_DIR", "./output")
@@ -594,7 +607,13 @@ async def upload_stl_and_slice(
         name_root, file_ext = os.path.splitext(original_filename)
         file_ext = file_ext.lower()
 
-        logger.info("[Upload] Received file: %s (type: %s)", original_filename, file_ext)
+        # 요청 파라미터 로깅
+        logger.info("[UploadSTL] Request Parameters:")
+        logger.info("[UploadSTL]   - model_file: %s (extension: %s)", original_filename, file_ext)
+        logger.info("[UploadSTL]   - printer_name: %s", printer_name if printer_name else "None")
+        logger.info("[UploadSTL]   - printer_definition_json: %s",
+                   "Provided" if printer_definition_json else "None")
+        logger.info("[UploadSTL]   - cura_settings_json: %s", cura_settings_json[:100] if cura_settings_json else "{}")
 
         # 파일 저장
         file_bytes = await model_file.read()
@@ -684,31 +703,81 @@ async def upload_stl_and_slice(
         # Cura 설정 파싱
         try:
             cura_settings = json.loads(cura_settings_json) if cura_settings_json else {}
-        except json.JSONDecodeError:
+            logger.info("[UploadSTL] Parsed Cura settings: %d parameters", len(cura_settings))
+            if cura_settings:
+                for key, value in list(cura_settings.items())[:5]:  # 처음 5개만 로깅
+                    logger.info("[UploadSTL]   - %s: %s", key, value)
+                if len(cura_settings) > 5:
+                    logger.info("[UploadSTL]   - ... and %d more settings", len(cura_settings) - 5)
+        except json.JSONDecodeError as e:
+            logger.error("[UploadSTL] Invalid cura_settings_json: %s", str(e))
             raise HTTPException(status_code=400, detail="Invalid cura_settings_json format")
 
-        # 프린터 정의 파싱
-        printer_definition = None
-        if printer_definition_json:
+        # 슬라이싱 실행 (우선순위: printer_name > printer_definition_json > 기본)
+        logger.info("[UploadSTL] Starting slicing process...")
+        if printer_name:
+            # 방법 1: printer_name 사용 (권장)
+            logger.info("[UploadSTL] Using printer name: %s", printer_name)
+            success = await convert_stl_to_gcode_with_printer_name(
+                stl_path=os.path.abspath(stl_path),
+                gcode_path=os.path.abspath(gcode_path),
+                printer_name=printer_name,
+                custom_settings=cura_settings,
+            )
+
+        elif printer_definition_json:
+            # 방법 2: printer_definition JSON 사용 (고급)
             try:
                 printer_definition = json.loads(printer_definition_json)
             except json.JSONDecodeError:
                 raise HTTPException(status_code=400, detail="Invalid printer_definition_json format")
 
-        # 슬라이싱 실행
-        if printer_definition:
-            logger.info("[UploadSTL] Using client-provided printer definition")
-            success = await convert_stl_to_gcode_with_definition(
-                stl_path=os.path.abspath(stl_path),
-                gcode_path=os.path.abspath(gcode_path),
-                printer_definition=printer_definition,
-                custom_settings=cura_settings,
-            )
+            logger.info("[UploadSTL] Using client-provided printer definition JSON")
+
+            # 먼저 커스텀 정의로 시도
+            try:
+                success = await convert_stl_to_gcode_with_definition(
+                    stl_path=os.path.abspath(stl_path),
+                    gcode_path=os.path.abspath(gcode_path),
+                    printer_definition=printer_definition,
+                    custom_settings=cura_settings,
+                )
+            except Exception as e:
+                # 커스텀 정의 실패 시 fallback: fdmprinter + bed size만 사용
+                logger.warning("[UploadSTL] Custom printer definition failed: %s", str(e))
+                logger.info("[UploadSTL] Falling back to fdmprinter with bed size only")
+
+                # printer_definition에서 bed size 추출
+                bed_size_settings = {}
+                if 'overrides' in printer_definition:
+                    for key in ['machine_width', 'machine_depth', 'machine_height']:
+                        if key in printer_definition['overrides']:
+                            value = printer_definition['overrides'][key]
+                            if isinstance(value, dict) and 'default_value' in value:
+                                bed_size_settings[key] = str(value['default_value'])
+                            else:
+                                bed_size_settings[key] = str(value)
+
+                logger.info("[UploadSTL] Extracted bed size: %s", bed_size_settings)
+
+                # cura_settings와 bed_size_settings 병합
+                fallback_settings = {**cura_settings, **bed_size_settings}
+
+                # fdmprinter로 재시도
+                success = await convert_stl_to_gcode_with_printer_name(
+                    stl_path=os.path.abspath(stl_path),
+                    gcode_path=os.path.abspath(gcode_path),
+                    printer_name="fdmprinter",
+                    custom_settings=fallback_settings,
+                )
+
         else:
+            # 방법 3: 기본 프린터 사용 (.env의 CURA_DEFINITION_JSON)
             from cura_processor import is_curaengine_available
             if not is_curaengine_available():
                 raise HTTPException(status_code=503, detail="CuraEngine not available")
 
+            logger.info("[UploadSTL] Using default printer from .env")
             success = await convert_stl_to_gcode(
                 stl_path=os.path.abspath(stl_path),
                 gcode_path=os.path.abspath(gcode_path),
@@ -716,12 +785,16 @@ async def upload_stl_and_slice(
             )
 
         if not success:
+            logger.error("[UploadSTL] Slicing failed!")
             raise RuntimeError("Slicing failed")
+
+        logger.info("[UploadSTL] Slicing completed successfully")
 
         # 파일 정리 (최신 50개만 유지)
         cleanup_old_files(output_dir, max_files=50)
 
         # 응답 데이터
+        logger.info("[UploadSTL] Preparing response data...")
         response_data = {
             "original_filename": original_filename,
             "original_format": file_ext,
@@ -738,16 +811,38 @@ async def upload_stl_and_slice(
             },
         }
 
+        # 사용된 프린터 정보 추가
+        if printer_name:
+            response_data["printer_name"] = printer_name
+            response_data["printer_source"] = "client_name"
+        elif printer_definition_json:
+            response_data["printer_source"] = "client_definition"
+        else:
+            response_data["printer_source"] = "default"
+
         if cura_settings:
             response_data["cura_settings"] = cura_settings
 
-        logger.info("[Upload] Success: %s (format: %s)", gcode_filename, file_ext)
+        logger.info("[UploadSTL] ===== REQUEST COMPLETED SUCCESSFULLY =====")
+        logger.info("[UploadSTL] Response Summary:")
+        logger.info("[UploadSTL]   - G-code file: %s", gcode_filename)
+        logger.info("[UploadSTL]   - G-code size: %s bytes",
+                   response_data['file_size']['gcode_bytes'])
+        logger.info("[UploadSTL]   - G-code URL: %s", response_data['gcode_url'])
+        logger.info("[UploadSTL]   - Printer source: %s", response_data['printer_source'])
+        if printer_name:
+            logger.info("[UploadSTL]   - Printer name: %s", printer_name)
+        logger.info("="*80)
+
         return ApiResponse(status="ok", data=response_data)
 
-    except HTTPException:
+    except HTTPException as e:
+        logger.error("[UploadSTL] HTTP Exception: %s - %s", e.status_code, e.detail)
+        logger.info("="*80)
         raise
     except Exception as e:
-        logger.exception("[UploadSTL] Failed: %s", e)
+        logger.exception("[UploadSTL] Unexpected error: %s", e)
+        logger.info("="*80)
         raise HTTPException(status_code=500, detail=str(e))
 
 
