@@ -9,6 +9,7 @@ __pycache__/
 .Python
 
 # Virtual environments
+.venv/
 venv/
 env/
 ENV/
@@ -24,7 +25,7 @@ ENV/
 output/
 *.glb
 *.gltf
-*.obj
+*.obj 
 
 # Uploaded images
 *.png

@@ -121,6 +121,29 @@ def is_curaengine_available() -> bool:
     return True
 
 
+def get_default_printer_name() -> str:
+    """
+    Extract printer name from CURA_DEFINITION_JSON path.
+
+    Returns:
+        Printer name (e.g., "creality_ender3" from "creality_ender3.def.json")
+        Falls back to "fdmprinter" if extraction fails.
+    """
+    if not CURA_DEFINITION_JSON:
+        return "fdmprinter"
+
+    try:
+        # Extract filename without extension
+        # e.g., "C:/...../creality_ender3.def.json" -> "creality_ender3"
+        filename = Path(CURA_DEFINITION_JSON).stem  # Gets "creality_ender3.def"
+        printer_name = filename.replace('.def', '')  # Gets "creality_ender3"
+        logger.info("[Cura] Extracted default printer name: %s", printer_name)
+        return printer_name
+    except Exception as e:
+        logger.warning("[Cura] Failed to extract printer name from definition: %s", e)
+        return "fdmprinter"
+
+
 def merge_settings(custom_settings: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """
     Merge custom settings with default settings.

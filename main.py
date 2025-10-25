@@ -821,11 +821,15 @@ async def upload_stl_and_slice(
                 # cura_settings와 bed_size_settings 병합
                 fallback_settings = {**cura_settings, **bed_size_settings}
 
-                # ultimaker2로 재시도 (가장 안정적인 기본 프린터)
+                # .env에서 설정한 기본 프린터로 재시도
+                from cura_processor import get_default_printer_name
+                default_printer = get_default_printer_name()
+                logger.info("[UploadSTL] Fallback to default printer: %s", default_printer)
+
                 success = await convert_stl_to_gcode_with_printer_name(
                     stl_path=os.path.abspath(stl_path),
                     gcode_path=os.path.abspath(gcode_path),
-                    printer_name="ultimaker2",
+                    printer_name=default_printer,
                     custom_settings=fallback_settings,
                 )
 
