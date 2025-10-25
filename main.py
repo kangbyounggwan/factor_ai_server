@@ -541,11 +541,16 @@ async def generate_gcode(payload: GenerateGCodeRequest):
         # Add download URL
         gcode_url = f"/files/{os.path.basename(gcode_path)}"
 
+        # G-code 메타데이터 추출
+        from cura_processor import parse_gcode_metadata
+        gcode_metadata = parse_gcode_metadata(gcode_path)
+
         response_data = {
             "task_id": task_id,
             "input_stl": stl_path,
             "gcode_path": gcode_path,
             "gcode_url": gcode_url,
+            "gcode_metadata": gcode_metadata,
         }
 
         if payload.cura_settings:
@@ -566,7 +571,7 @@ async def generate_gcode(payload: GenerateGCodeRequest):
 
 @app.post("/v1/process/upload-stl-and-slice", response_model=ApiResponse)
 async def upload_stl_and_slice(
-    model_file: UploadFile = File(...),  # 3D 모델 파일 (STL, GLB, GLTF, OBJ)
+    file: UploadFile = File(...),  # 3D 모델 파일 (STL, GLB, GLTF, OBJ)
     cura_settings_json: str = Form("{}"),
     printer_name: str = Form(None),
     printer_definition_json: str = Form(None),
@@ -578,7 +583,7 @@ async def upload_stl_and_slice(
     - GLB/GLTF/OBJ 파일은 자동으로 STL로 변환됩니다.
 
     Form-data 필드:
-    - model_file: 3D 모델 파일 (필수) - STL, GLB, GLTF, OBJ
+    - file: 3D 모델 파일 (필수) - STL, GLB, GLTF, OBJ
     - cura_settings_json: Cura 설정 JSON 문자열 (선택)
     - printer_name: 프린터 이름 (선택, 권장) - DB의 filename에서 .def.json 제거한 값
                    예: "elegoo_neptune_x", "creality_ender3pro"
@@ -603,20 +608,20 @@ async def upload_stl_and_slice(
 
         # 파일명 및 확장자 추출
         timestamp = int(time.time())
-        original_filename = getattr(model_file, "filename", "model.stl")
+        original_filename = getattr(file, "filename", "model.stl")
         name_root, file_ext = os.path.splitext(original_filename)
         file_ext = file_ext.lower()
 
         # 요청 파라미터 로깅
         logger.info("[UploadSTL] Request Parameters:")
-        logger.info("[UploadSTL]   - model_file: %s (extension: %s)", original_filename, file_ext)
+        logger.info("[UploadSTL]   - file: %s (extension: %s)", original_filename, file_ext)
         logger.info("[UploadSTL]   - printer_name: %s", printer_name if printer_name else "None")
         logger.info("[UploadSTL]   - printer_definition_json: %s",
                    "Provided" if printer_definition_json else "None")
         logger.info("[UploadSTL]   - cura_settings_json: %s", cura_settings_json[:100] if cura_settings_json else "{}")
 
         # 파일 저장
-        file_bytes = await model_file.read()
+        file_bytes = await file.read()
         temp_filename = f"uploaded_{name_root}_{timestamp}{file_ext}"
         temp_path = os.path.join(output_dir, temp_filename)
 
@@ -658,6 +663,20 @@ async def upload_stl_and_slice(
                 logger.info("[Upload] Loaded mesh: %d vertices, %d faces",
                            len(mesh.vertices), len(mesh.faces))
 
+                # 원본 GLB 크기 측정
+                original_bounds = mesh.bounds
+                original_size_x = original_bounds[1, 0] - original_bounds[0, 0]
+                original_size_y = original_bounds[1, 1] - original_bounds[0, 1]
+                original_size_z = original_bounds[1, 2] - original_bounds[0, 2]
+
+                logger.info("="*80)
+                logger.info("[Upload] 📦 ORIGINAL GLB SIZE:")
+                logger.info("[Upload]   X: %.2f mm", original_size_x)
+                logger.info("[Upload]   Y: %.2f mm", original_size_y)
+                logger.info("[Upload]   Z: %.2f mm", original_size_z)
+                logger.info("[Upload]   Volume: %.2f mm³", mesh.volume if hasattr(mesh, 'volume') else 0)
+                logger.info("="*80)
+
                 # 기본 수리
                 trimesh.repair.fix_inversion(mesh)
                 trimesh.repair.fill_holes(mesh)
@@ -665,8 +684,47 @@ async def upload_stl_and_slice(
                 mesh.remove_duplicate_faces()
                 mesh.remove_unreferenced_vertices()
 
+                # 3D 프린팅을 위한 위치 조정
+                # 1. 바닥으로 이동 (Z축 최소값을 0으로)
+                minz = mesh.bounds[0, 2]
+                if minz < 0:
+                    mesh.apply_translation((0, 0, -minz))
+                    logger.info("[Upload] Moved model to Z=0 (shifted by %.2f mm)", -minz)
+
+                # 2. XY 평면 중심 정렬 (베드 중앙)
+                center_xy = mesh.bounds.mean(axis=0)
+                center_xy[2] = 0  # Z축은 유지
+                mesh.apply_translation(-center_xy)
+                logger.info("[Upload] Centered model on build plate (XY offset: %.2f, %.2f)",
+                           -center_xy[0], -center_xy[1])
+
                 # STL로 내보내기
                 mesh.export(stl_path, file_type='stl')
+
+                # STL 크기 재확인 (변환 후)
+                stl_bounds = mesh.bounds
+                stl_size_x = stl_bounds[1, 0] - stl_bounds[0, 0]
+                stl_size_y = stl_bounds[1, 1] - stl_bounds[0, 1]
+                stl_size_z = stl_bounds[1, 2] - stl_bounds[0, 2]
+
+                logger.info("="*80)
+                logger.info("[Upload] 📏 CONVERTED STL SIZE:")
+                logger.info("[Upload]   X: %.2f mm", stl_size_x)
+                logger.info("[Upload]   Y: %.2f mm", stl_size_y)
+                logger.info("[Upload]   Z: %.2f mm", stl_size_z)
+                logger.info("[Upload]   Volume: %.2f mm³", mesh.volume if hasattr(mesh, 'volume') else 0)
+
+                # 크기 변화 확인
+                size_diff_x = abs(stl_size_x - original_size_x)
+                size_diff_y = abs(stl_size_y - original_size_y)
+                size_diff_z = abs(stl_size_z - original_size_z)
+
+                if size_diff_x < 0.01 and size_diff_y < 0.01 and size_diff_z < 0.01:
+                    logger.info("[Upload] ✅ Size preserved: GLB and STL are identical")
+                else:
+                    logger.warning("[Upload] ⚠️  Size changed: ΔX=%.2fmm, ΔY=%.2fmm, ΔZ=%.2fmm",
+                                 size_diff_x, size_diff_y, size_diff_z)
+                logger.info("="*80)
 
                 # 원본 파일 삭제
                 os.remove(temp_path)
@@ -763,11 +821,11 @@ async def upload_stl_and_slice(
                 # cura_settings와 bed_size_settings 병합
                 fallback_settings = {**cura_settings, **bed_size_settings}
 
-                # fdmprinter로 재시도
+                # ultimaker2로 재시도 (가장 안정적인 기본 프린터)
                 success = await convert_stl_to_gcode_with_printer_name(
                     stl_path=os.path.abspath(stl_path),
                     gcode_path=os.path.abspath(gcode_path),
-                    printer_name="fdmprinter",
+                    printer_name="ultimaker2",
                     custom_settings=fallback_settings,
                 )
 
@@ -790,6 +848,11 @@ async def upload_stl_and_slice(
 
         logger.info("[UploadSTL] Slicing completed successfully")
 
+        # G-code 메타데이터 추출
+        logger.info("[UploadSTL] Extracting G-code metadata...")
+        from cura_processor import parse_gcode_metadata
+        gcode_metadata = parse_gcode_metadata(gcode_path)
+
         # 파일 정리 (최신 50개만 유지)
         cleanup_old_files(output_dir, max_files=50)
 
@@ -809,6 +872,7 @@ async def upload_stl_and_slice(
                 "stl_bytes": stl_size,
                 "gcode_bytes": os.path.getsize(gcode_path) if os.path.exists(gcode_path) else 0,
             },
+            "gcode_metadata": gcode_metadata,  # G-code 메타데이터 추가
         }
 
         # 사용된 프린터 정보 추가

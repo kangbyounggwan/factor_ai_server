@@ -90,6 +90,9 @@ DEFAULT_CURA_SETTINGS = {
     "fill_outline_gaps": "true",
     "filter_out_tiny_gaps": "false",
     "skin_monotonic": "false",
+    "roofing_layer_count": "0",  # Number of top layers with roofing pattern
+    "top_layers": "4",  # Number of top layers
+    "bottom_layers": "4",  # Number of bottom layers
 
     # Machine settings (fallback if not in definition)
     "machine_center_is_zero": "false",
@@ -213,15 +216,10 @@ async def run_curaengine_process(
 
         def run_subprocess():
             try:
-                # CuraEngine을 Cura resources 디렉토리에서 실행
-                # 이렇게 하면 extruders/, definitions/ 등을 상대 경로로 찾을 수 있음
-                cura_resources_dir = Path(CURAENGINE_PATH).parent / "share" / "cura" / "resources"
-
                 process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    cwd=str(cura_resources_dir) if cura_resources_dir.exists() else None,
                 )
                 stdout, _ = process.communicate(timeout=CURA_TIMEOUT)
                 return process.returncode, stdout
@@ -327,6 +325,434 @@ def parse_slicing_stats(log_output: str) -> Dict[str, any]:
         logger.warning("[Cura] Failed to parse statistics: %s", str(e))
 
     return stats
+
+
+def calculate_gcode_stats_from_content(gcode_path: str) -> Dict[str, any]:
+    """
+    G-code 본문을 직접 파싱하여 실제 출력 시간과 필라멘트 사용량 계산.
+
+    CuraEngine이 TIME과 MATERIAL에 더미값을 넣는 경우를 대비하여
+    G1 명령어를 직접 분석합니다.
+    """
+    from pathlib import Path
+
+    stats = {
+        'calculated_time_seconds': None,
+        'calculated_filament_mm': None,
+        'calculated_filament_m': None,
+        'calculated_filament_g': None,
+    }
+
+    try:
+        gcode_file = Path(gcode_path)
+        if not gcode_file.exists():
+            return stats
+
+        total_time_seconds = 0.0
+        max_e_value = 0.0
+        current_feedrate = 0.0  # mm/min
+        last_x, last_y, last_z = 0.0, 0.0, 0.0
+
+        logger.info("[GCodeCalc] Calculating actual time and filament from G-code commands...")
+
+        with open(gcode_file, 'r', encoding='utf-8', errors='ignore') as f:
+            for line_num, line in enumerate(f):
+                line = line.strip()
+
+                # G1 이동 명령 파싱
+                if line.startswith('G1 '):
+                    import re
+
+                    # Feedrate (F) 추출
+                    f_match = re.search(r'F([\d.]+)', line)
+                    if f_match:
+                        current_feedrate = float(f_match.group(1))  # mm/min
+
+                    # Extrusion (E) 추출 - 최대값 추적
+                    e_match = re.search(r'E([\d.\-]+)', line)
+                    if e_match:
+                        e_value = float(e_match.group(1))
+                        if e_value > max_e_value:
+                            max_e_value = e_value
+
+                    # 좌표 추출
+                    x_match = re.search(r'X([\d.\-]+)', line)
+                    y_match = re.search(r'Y([\d.\-]+)', line)
+                    z_match = re.search(r'Z([\d.\-]+)', line)
+
+                    x = float(x_match.group(1)) if x_match else last_x
+                    y = float(y_match.group(1)) if y_match else last_y
+                    z = float(z_match.group(1)) if z_match else last_z
+
+                    # 이동 거리 계산
+                    import math
+                    distance = math.sqrt((x - last_x)**2 + (y - last_y)**2 + (z - last_z)**2)
+
+                    # 시간 계산 (distance / feedrate)
+                    if current_feedrate > 0 and distance > 0:
+                        time_minutes = distance / current_feedrate
+                        total_time_seconds += time_minutes * 60
+
+                    last_x, last_y, last_z = x, y, z
+
+        # 결과 저장
+        if total_time_seconds > 0:
+            stats['calculated_time_seconds'] = int(total_time_seconds)
+
+        if max_e_value > 0:
+            stats['calculated_filament_mm'] = round(max_e_value, 2)
+            stats['calculated_filament_m'] = round(max_e_value / 1000.0, 2)
+
+            # 무게 계산 (1.75mm 필라멘트, PLA 1.24 g/cm³)
+            filament_radius_mm = 1.75 / 2.0
+            volume_mm3 = max_e_value * 3.14159 * (filament_radius_mm ** 2)
+            volume_cm3 = volume_mm3 / 1000.0
+            weight_g = volume_cm3 * 1.24
+            stats['calculated_filament_g'] = round(weight_g, 2)
+
+        logger.info("[GCodeCalc] Calculated: time=%ds (%.1fmin), filament=%.2fm (%.2fg)",
+                   stats.get('calculated_time_seconds', 0),
+                   stats.get('calculated_time_seconds', 0) / 60.0,
+                   stats.get('calculated_filament_m', 0),
+                   stats.get('calculated_filament_g', 0))
+
+    except Exception as e:
+        logger.error("[GCodeCalc] Failed to calculate stats: %s", str(e))
+
+    return stats
+
+
+def parse_gcode_metadata(gcode_path: str) -> Dict[str, any]:
+    """
+    G-code 파일에서 메타데이터를 추출합니다.
+
+    Cura가 생성한 G-code 파일의 주석에서 다음 정보를 추출:
+    - 출력 시간 (print_time_seconds, print_time_formatted)
+    - 필라멘트 사용량 (filament_used_m, filament_weight_g, filament_cost)
+    - 레이어 정보 (layer_count, layer_height)
+    - 모델 크기 (bounding_box: minx, maxx, miny, maxy, minz, maxz)
+    - 온도 설정 (nozzle_temp, bed_temp)
+    - 프린터 정보 (printer_name)
+
+    Args:
+        gcode_path: G-code 파일 경로
+
+    Returns:
+        딕셔너리 형태의 메타데이터
+    """
+    import re
+    from pathlib import Path
+
+    metadata = {
+        "print_time_seconds": None,
+        "print_time_formatted": None,
+        "filament_used_m": None,
+        "filament_weight_g": None,
+        "filament_cost": None,
+        "layer_count": None,
+        "layer_height": None,
+        "bounding_box": {},
+        "nozzle_temp": None,
+        "bed_temp": None,
+        "printer_name": None,
+    }
+
+    try:
+        gcode_file = Path(gcode_path)
+        if not gcode_file.exists():
+            logger.warning("[GCodeMeta] File not found: %s", gcode_path)
+            return metadata
+
+        # G-code 파일을 스트리밍 방식으로 읽기
+        # 필요한 정보를 모두 찾으면 조기 종료하여 성능 향상
+        lines_read = 0
+
+        with open(gcode_file, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                lines_read += 1
+                line = line.strip()
+
+                # 모든 주요 메타데이터를 찾았는지 체크 (조기 종료 조건)
+                # 헤더 정보(TIME, MATERIAL 등)는 처음 부분에 있고,
+                # 온도 정보(M104, M140)는 중간~후반부에 있으므로
+                # 모든 정보를 찾은 후에만 종료
+                if (lines_read > 100 and  # 최소 100줄은 읽기
+                    metadata.get('nozzle_temp') is not None and
+                    metadata.get('bed_temp') is not None and
+                    metadata.get('print_time_seconds') is not None and
+                    metadata.get('layer_count') is not None):
+                    # 모든 주요 정보를 찾았으면 더 읽을 필요 없음
+                    logger.info("[GCodeMeta] All metadata found at line %d, stopping scan", lines_read)
+                    break
+
+                # 출력 시간 (초)
+                if line.startswith(';TIME:'):
+                    match = re.search(r';TIME:(\d+)', line)
+                    if match:
+                        seconds = int(match.group(1))
+                        metadata['print_time_seconds'] = seconds
+
+                        # 포맷된 시간 계산 (예: "1h 30m")
+                        hours = seconds // 3600
+                        minutes = (seconds % 3600) // 60
+                        if hours > 0:
+                            metadata['print_time_formatted'] = f"{hours}h {minutes}m"
+                        else:
+                            metadata['print_time_formatted'] = f"{minutes}m"
+
+                # 필라멘트 사용량 (미터) - 여러 형식 지원
+                elif ';Filament used' in line.lower():
+                    # Format 1: ";Filament used: 1.23m"
+                    match = re.search(r'([\d.]+)\s*m\b', line, re.IGNORECASE)
+                    if match:
+                        metadata['filament_used_m'] = float(match.group(1))
+                    # Format 2: ";Filament used: [1.23]"
+                    match = re.search(r'\[([\d.]+)\]', line)
+                    if match and metadata['filament_used_m'] is None:
+                        metadata['filament_used_m'] = float(match.group(1))
+
+                # 필라멘트 무게 (그램) - 여러 형식 지원
+                elif ';Filament weight' in line.lower() or ';Filament mass' in line.lower():
+                    # Format 1: "weight = 3.64g" or "3.64g"
+                    match = re.search(r'([\d.]+)\s*g\b', line, re.IGNORECASE)
+                    if match:
+                        metadata['filament_weight_g'] = float(match.group(1))
+                    # Format 2: "[3.64]"
+                    match = re.search(r'\[([\d.]+)\]', line)
+                    if match and metadata['filament_weight_g'] is None:
+                        metadata['filament_weight_g'] = float(match.group(1))
+
+                # 필라멘트 비용
+                elif ';Filament cost' in line.lower():
+                    match = re.search(r'([\d.]+)', line)
+                    if match:
+                        metadata['filament_cost'] = float(match.group(1))
+
+                # MATERIAL (Cura 5.x 형식 - mm³ 또는 cm³)
+                elif line.startswith(';MATERIAL:') or line.startswith(';MATERIAL2:'):
+                    match = re.search(r';MATERIAL2?:([\d.]+)', line)
+                    if match:
+                        volume_mm3 = float(match.group(1))
+                        # mm³를 미터로 변환 (필라멘트 직경 1.75mm 가정)
+                        # Volume = π * r² * length
+                        # length = Volume / (π * r²)
+                        # r = 1.75/2 = 0.875mm
+                        filament_radius_mm = 1.75 / 2.0
+                        area_mm2 = 3.14159 * (filament_radius_mm ** 2)
+                        length_mm = volume_mm3 / area_mm2
+                        length_m = length_mm / 1000.0
+
+                        if metadata['filament_used_m'] is None:
+                            metadata['filament_used_m'] = round(length_m, 2)
+
+                        # 무게 계산 (PLA 밀도: 1.24 g/cm³)
+                        if metadata['filament_weight_g'] is None:
+                            volume_cm3 = volume_mm3 / 1000.0
+                            weight_g = volume_cm3 * 1.24  # PLA 밀도
+                            metadata['filament_weight_g'] = round(weight_g, 2)
+
+                # 레이어 수
+                elif line.startswith(';LAYER_COUNT:'):
+                    match = re.search(r';LAYER_COUNT:(\d+)', line)
+                    if match:
+                        metadata['layer_count'] = int(match.group(1))
+
+                # 레이어 높이 - 여러 형식 지원
+                elif ';Layer height' in line.lower() or ';LAYER_HEIGHT' in line:
+                    # Format 1: ";Layer height: 0.2"
+                    match = re.search(r'height[:\s]+([\d.]+)', line, re.IGNORECASE)
+                    if match:
+                        metadata['layer_height'] = float(match.group(1))
+                    # Format 2: ";LAYER_HEIGHT:0.2"
+                    match = re.search(r'LAYER_HEIGHT:([\d.]+)', line)
+                    if match and metadata['layer_height'] is None:
+                        metadata['layer_height'] = float(match.group(1))
+
+                # Bounding Box (과학적 표기법 지원: 2.14748e+06)
+                elif line.startswith(';MINX:'):
+                    match = re.search(r';MINX:([\d.\-+eE]+)', line)
+                    if match:
+                        value = float(match.group(1))
+                        # 더미값 체크 (1e6 이상은 무효)
+                        if abs(value) < 1e6:
+                            metadata['bounding_box']['min_x'] = value
+                elif line.startswith(';MAXX:'):
+                    match = re.search(r';MAXX:([\d.\-+eE]+)', line)
+                    if match:
+                        value = float(match.group(1))
+                        if abs(value) < 1e6:
+                            metadata['bounding_box']['max_x'] = value
+                elif line.startswith(';MINY:'):
+                    match = re.search(r';MINY:([\d.\-+eE]+)', line)
+                    if match:
+                        value = float(match.group(1))
+                        if abs(value) < 1e6:
+                            metadata['bounding_box']['min_y'] = value
+                elif line.startswith(';MAXY:'):
+                    match = re.search(r';MAXY:([\d.\-+eE]+)', line)
+                    if match:
+                        value = float(match.group(1))
+                        if abs(value) < 1e6:
+                            metadata['bounding_box']['max_y'] = value
+                elif line.startswith(';MINZ:'):
+                    match = re.search(r';MINZ:([\d.\-+eE]+)', line)
+                    if match:
+                        value = float(match.group(1))
+                        if abs(value) < 1e6:
+                            metadata['bounding_box']['min_z'] = value
+                elif line.startswith(';MAXZ:'):
+                    match = re.search(r';MAXZ:([\d.\-+eE]+)', line)
+                    if match:
+                        value = float(match.group(1))
+                        if abs(value) < 1e6:
+                            metadata['bounding_box']['max_z'] = value
+
+                # 온도 설정 - 노즐 (주석 또는 G-code 명령어에서)
+                elif ';Material print temperature:' in line.lower():
+                    match = re.search(r'(\d+)', line)
+                    if match and metadata['nozzle_temp'] is None:
+                        metadata['nozzle_temp'] = int(match.group(1))
+
+                # 온도 설정 - 베드 (주석에서)
+                elif ';Material bed temperature:' in line.lower():
+                    match = re.search(r'(\d+)', line)
+                    if match and metadata['bed_temp'] is None:
+                        metadata['bed_temp'] = int(match.group(1))
+
+                # 프린터 이름
+                elif line.startswith(';Printer name:') or line.startswith(';FLAVOR:'):
+                    if 'Printer name:' in line:
+                        match = re.search(r';Printer name:\s*(.+)', line)
+                        if match:
+                            metadata['printer_name'] = match.group(1).strip()
+
+                # M104/M109: 노즐 온도 설정 (예: M104 S200)
+                elif (line.startswith('M104 ') or line.startswith('M109 ')) and metadata['nozzle_temp'] is None:
+                    match = re.search(r'S([\d.]+)', line)
+                    if match:
+                        temp = int(float(match.group(1)))
+                        if temp > 0:  # S0은 무시 (끄기 명령)
+                            metadata['nozzle_temp'] = temp
+
+                # M140/M190: 베드 온도 설정 (예: M140 S60)
+                elif (line.startswith('M140 ') or line.startswith('M190 ')) and metadata['bed_temp'] is None:
+                    match = re.search(r'S([\d.]+)', line)
+                    if match:
+                        temp = int(float(match.group(1)))
+                        if temp > 0:  # S0은 무시
+                            metadata['bed_temp'] = temp
+
+        # 모델 크기 계산 (bounding box가 있으면)
+        bbox = metadata['bounding_box']
+        has_valid_bbox = False
+
+        # Bounding box 유효성 체크
+        # 1. 모든 값이 존재하는지
+        # 2. min < max 인지
+        # 3. size가 양수인지
+        if (bbox.get('min_x') is not None and bbox.get('max_x') is not None and
+            bbox.get('min_y') is not None and bbox.get('max_y') is not None and
+            bbox.get('min_z') is not None and bbox.get('max_z') is not None):
+
+            size_x = bbox['max_x'] - bbox['min_x']
+            size_y = bbox['max_y'] - bbox['min_y']
+            size_z = bbox['max_z'] - bbox['min_z']
+
+            # Size가 모두 양수인지 확인
+            if size_x > 0 and size_y > 0 and size_z > 0:
+                metadata['bounding_box']['size_x'] = size_x
+                metadata['bounding_box']['size_y'] = size_y
+                metadata['bounding_box']['size_z'] = size_z
+                has_valid_bbox = True
+                logger.info("[GCodeMeta] Valid bounding box from G-code: %.2f x %.2f x %.2f mm",
+                           size_x, size_y, size_z)
+            else:
+                logger.warning("[GCodeMeta] Invalid bounding box: negative size detected (X=%.2f, Y=%.2f, Z=%.2f)",
+                             size_x, size_y, size_z)
+                metadata['bounding_box'] = {}
+
+        if not has_valid_bbox:
+            logger.warning("[GCodeMeta] Invalid bounding box detected (dummy values) - will try to extract from STL")
+
+            # STL 파일에서 직접 크기 읽기
+            stl_path = str(gcode_file).replace('.gcode', '.stl')
+            if os.path.exists(stl_path):
+                try:
+                    import trimesh
+                    logger.info("[GCodeMeta] Reading bounding box from STL: %s", stl_path)
+                    stl_mesh = trimesh.load(stl_path, file_type='stl')
+                    stl_bounds = stl_mesh.bounds
+
+                    metadata['bounding_box'] = {
+                        'min_x': round(stl_bounds[0, 0], 2),
+                        'max_x': round(stl_bounds[1, 0], 2),
+                        'min_y': round(stl_bounds[0, 1], 2),
+                        'max_y': round(stl_bounds[1, 1], 2),
+                        'min_z': round(stl_bounds[0, 2], 2),
+                        'max_z': round(stl_bounds[1, 2], 2),
+                        'size_x': round(stl_bounds[1, 0] - stl_bounds[0, 0], 2),
+                        'size_y': round(stl_bounds[1, 1] - stl_bounds[0, 1], 2),
+                        'size_z': round(stl_bounds[1, 2] - stl_bounds[0, 2], 2),
+                    }
+                    has_valid_bbox = True
+                    logger.info("[GCodeMeta] ✅ Extracted bounding box from STL successfully")
+                except Exception as e:
+                    logger.warning("[GCodeMeta] Failed to extract bounding box from STL: %s", e)
+                    metadata['bounding_box'] = {}
+            else:
+                logger.warning("[GCodeMeta] STL file not found for bounding box extraction: %s", stl_path)
+                metadata['bounding_box'] = {}
+
+        # 더미값 체크 및 실제 계산 수행
+        # TIME:6666 또는 MATERIAL:6666 같은 더미값 감지
+        is_dummy_time = (metadata.get('print_time_seconds') == 6666)
+        is_dummy_material = (metadata.get('filament_used_m') is None or
+                            metadata.get('filament_used_m') == 0 or
+                            metadata.get('filament_used_m') > 1000)  # 1km 이상은 비정상
+
+        if is_dummy_time or is_dummy_material:
+            logger.warning("[GCodeMeta] Detected dummy/invalid values - calculating from G-code content...")
+            calculated_stats = calculate_gcode_stats_from_content(str(gcode_file))
+
+            # 더미값인 경우 계산값으로 대체
+            if is_dummy_time and calculated_stats.get('calculated_time_seconds'):
+                metadata['print_time_seconds'] = calculated_stats['calculated_time_seconds']
+                seconds = metadata['print_time_seconds']
+                hours = seconds // 3600
+                minutes = (seconds % 3600) // 60
+                if hours > 0:
+                    metadata['print_time_formatted'] = f"{hours}h {minutes}m"
+                else:
+                    metadata['print_time_formatted'] = f"{minutes}m"
+
+            if is_dummy_material:
+                if calculated_stats.get('calculated_filament_m'):
+                    metadata['filament_used_m'] = calculated_stats['calculated_filament_m']
+                if calculated_stats.get('calculated_filament_g'):
+                    metadata['filament_weight_g'] = calculated_stats['calculated_filament_g']
+
+        # 로그 출력
+        logger.info("[GCodeMeta] Parsed metadata from: %s", gcode_file.name)
+        logger.info("[GCodeMeta]   Print time: %s (%s seconds)",
+                   metadata.get('print_time_formatted', 'N/A'),
+                   metadata.get('print_time_seconds', 'N/A'))
+        logger.info("[GCodeMeta]   Filament: %.2f m, %.2f g",
+                   metadata.get('filament_used_m') or 0,
+                   metadata.get('filament_weight_g') or 0)
+        logger.info("[GCodeMeta]   Layers: %s (height: %s mm)",
+                   metadata.get('layer_count', 'N/A'),
+                   metadata.get('layer_height', 'N/A'))
+        logger.info("[GCodeMeta]   Temperature: Nozzle=%s°C, Bed=%s°C",
+                   metadata.get('nozzle_temp', 'N/A'),
+                   metadata.get('bed_temp', 'N/A'))
+
+        return metadata
+
+    except Exception as e:
+        logger.error("[GCodeMeta] Failed to parse metadata: %s", str(e))
+        import traceback
+        traceback.print_exc()
+        return metadata
 
 
 async def convert_stl_to_gcode(

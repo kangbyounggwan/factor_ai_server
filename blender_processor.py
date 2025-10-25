@@ -359,7 +359,19 @@ async def convert_glb_to_stl(glb_path: Path, stl_path: Path) -> bool:
         else:
             mesh = scene
 
-        logger.info("[Trimesh] Original: %d vertices, %d faces", len(mesh.vertices), len(mesh.faces))
+        # 원본 GLB 크기 확인
+        original_bounds = mesh.bounds
+        original_size_x = original_bounds[1, 0] - original_bounds[0, 0]
+        original_size_y = original_bounds[1, 1] - original_bounds[0, 1]
+        original_size_z = original_bounds[1, 2] - original_bounds[0, 2]
+
+        logger.info("="*80)
+        logger.info("[Trimesh] 📦 ORIGINAL GLB SIZE (before optimization):")
+        logger.info("[Trimesh]   X: %.2f mm", original_size_x)
+        logger.info("[Trimesh]   Y: %.2f mm", original_size_y)
+        logger.info("[Trimesh]   Z: %.2f mm", original_size_z)
+        logger.info("[Trimesh]   Original: %d vertices, %d faces", len(mesh.vertices), len(mesh.faces))
+        logger.info("="*80)
 
         # ===== 3D PRINTING OPTIMIZATION =====
 
@@ -403,6 +415,19 @@ async def convert_glb_to_stl(glb_path: Path, stl_path: Path) -> bool:
         center_xy = mesh.bounds.mean(axis=0)
         center_xy[2] = 0  # Z축은 유지
         mesh.apply_translation(-center_xy)
+
+        # 모델 크기 확인 (변환 후 최종 크기)
+        bounds = mesh.bounds  # [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+        model_size_x = bounds[1, 0] - bounds[0, 0]
+        model_size_y = bounds[1, 1] - bounds[0, 1]
+        model_size_z = bounds[1, 2] - bounds[0, 2]
+        logger.info("="*80)
+        logger.info("[Trimesh] 📏 MODEL SIZE (after conversion to STL):")
+        logger.info("[Trimesh]   X: %.2f mm", model_size_x)
+        logger.info("[Trimesh]   Y: %.2f mm", model_size_y)
+        logger.info("[Trimesh]   Z: %.2f mm", model_size_z)
+        logger.info("[Trimesh]   Bounding box: (%.2f, %.2f, %.2f) mm", model_size_x, model_size_y, model_size_z)
+        logger.info("="*80)
 
         # 7. 프린팅 가능성 확인
         logger.info("[Trimesh] Step 6/7: Checking printability...")
