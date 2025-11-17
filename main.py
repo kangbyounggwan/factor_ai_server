@@ -29,22 +29,25 @@ from modelling_api import (
 )
 from blender_processor import process_model_with_blender, is_blender_available
 from background_tasks import start_background_task, process_image_to_3d_background
+from auth import extract_user_id_from_token
 
 ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS_RAW.split(",")] if ALLOWED_ORIGINS_RAW else ["*"]
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:7000").rstrip("/")
 
 logger = logging.getLogger("uvicorn.error")
+logger.info(f"[CORS] ALLOWED_ORIGINS loaded: {ALLOWED_ORIGINS}")
 
 app = FastAPI(title="Factor AI Proxy API", version="0.1.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS is now handled by NGINX to avoid duplicate headers
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 
 # Note: /files endpoint is now handled by custom download_file_with_tracking()
 # to support auto-deletion after download
@@ -92,6 +95,10 @@ async def process_modelling(request: Request, async_mode: bool = False):
         async_mode: If True, return task_id immediately without waiting for completion.
                    Client should poll GET /v1/process/modelling/{task_id} for progress.
     """
+    # Extract user_id from JWT token in Authorization header
+    authorization = request.headers.get("authorization")
+    user_id_from_jwt = extract_user_id_from_token(authorization)
+
     try:
         content_type = (request.headers.get("content-type") or "").lower()
         # multipart/form-data: task, image_file, json
@@ -144,10 +151,26 @@ async def process_modelling(request: Request, async_mode: bool = False):
                     "request_payload": payload_log,
                 }
 
-                # Start background processing
+                # Start background processing with Supabase integration
                 task_id = result["task_id"]
                 endpoint = result["endpoint"]
-                start_background_task(task_id, process_image_to_3d_background(task_id, endpoint))
+                # Extract user_id: prefer JWT, fallback to metadata
+                user_id = user_id_from_jwt
+                if not user_id and extra_meta:
+                    metadata = extra_meta.get("metadata", {}) if extra_meta else {}
+                    user_id = metadata.get("user_id")
+                prompt = extra_meta.get("prompt") if extra_meta else None
+                source_image_url = save_path  # Use local path as source reference
+                start_background_task(
+                    task_id,
+                    process_image_to_3d_background(
+                        task_id=task_id,
+                        endpoint=endpoint,
+                        user_id=user_id,
+                        prompt=prompt,
+                        source_image_url=source_image_url
+                    )
+                )
 
                 logger.info("[Modelling] Async task started: task_id=%s", task_id)
                 logger.info("[Modelling] Full Response (async multipart): %s", response_data)
@@ -228,11 +251,24 @@ async def process_modelling(request: Request, async_mode: bool = False):
                     "request_payload": payload_dict,
                 }
 
-                # Start background processing
+                # Start background processing with Supabase integration
                 task_id = result["task_id"]
                 endpoint = result["endpoint"]
+                # Extract user_id: prefer JWT, fallback to metadata
+                user_id = user_id_from_jwt
+                if not user_id and payload.metadata:
+                    user_id = payload.metadata.user_id
+                prompt = payload.prompt
                 from background_tasks import process_text_to_3d_background
-                start_background_task(task_id, process_text_to_3d_background(task_id, endpoint))
+                start_background_task(
+                    task_id,
+                    process_text_to_3d_background(
+                        preview_task_id=task_id,
+                        endpoint=endpoint,
+                        user_id=user_id,
+                        prompt=prompt
+                    )
+                )
 
                 logger.info("[Modelling] Async text_to_3d task started: task_id=%s", task_id)
                 logger.info("[Modelling] Full Response (async json): %s", response_data)
@@ -248,10 +284,25 @@ async def process_modelling(request: Request, async_mode: bool = False):
                     "request_payload": payload_dict,
                 }
 
-                # Start background processing
+                # Start background processing with Supabase integration
                 task_id = result["task_id"]
                 endpoint = result["endpoint"]
-                start_background_task(task_id, process_image_to_3d_background(task_id, endpoint))
+                # Extract user_id: prefer JWT, fallback to metadata
+                user_id = user_id_from_jwt
+                if not user_id and payload.metadata:
+                    user_id = payload.metadata.user_id
+                prompt = payload.prompt if hasattr(payload, 'prompt') else None
+                source_image_url = payload.image.url if hasattr(payload, 'image') else None
+                start_background_task(
+                    task_id,
+                    process_image_to_3d_background(
+                        task_id=task_id,
+                        endpoint=endpoint,
+                        user_id=user_id,
+                        prompt=prompt,
+                        source_image_url=source_image_url
+                    )
+                )
 
                 logger.info("[Modelling] Async image_to_3d task started: task_id=%s", task_id)
                 logger.info("[Modelling] Full Response (async json): %s", response_data)
@@ -731,13 +782,17 @@ async def upload_stl_and_slice(
 
                 logger.info("[Upload] Converted to STL: %s", stl_path)
 
-            except ImportError:
+            except ImportError as e:
+                logger.error("[Upload] ImportError: %s", str(e), exc_info=True)
                 raise HTTPException(
                     status_code=500,
-                    detail="Trimesh library not available for file conversion"
+                    detail=f"Trimesh library not available for file conversion: {str(e)}"
                 )
             except Exception as e:
-                logger.error("[Upload] Conversion failed: %s", str(e))
+                logger.error("[Upload] Conversion failed: %s", str(e), exc_info=True)
+                # 원본 파일 삭제 (에러 시에도)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
                 raise HTTPException(
                     status_code=500,
                     detail=f"Failed to convert {file_ext} to STL: {str(e)}"
@@ -936,10 +991,15 @@ async def download_file_with_tracking(filename: str):
     from fastapi import BackgroundTasks
 
     async def mark_for_deletion():
-        """다운로드 완료 후 파일 삭제"""
+        """다운로드 완료 후 파일 삭제 (썸네일은 제외)"""
         import asyncio
         await asyncio.sleep(2)  # 다운로드 완료 대기
         try:
+            # 썸네일 파일은 삭제하지 않음 (브라우저에서 재사용 가능하도록)
+            if filename.startswith("thumbnail_"):
+                logger.info("[Download] Thumbnail file preserved: %s", filename)
+                return
+
             if os.path.exists(file_path):
                 os.remove(file_path)
                 logger.info("[Download] Deleted after download: %s", filename)

@@ -11,16 +11,35 @@ logger = logging.getLogger("uvicorn.error")
 _background_tasks: Dict[str, asyncio.Task] = {}
 
 
-async def process_image_to_3d_background(task_id: str, endpoint: str):
+async def process_image_to_3d_background(
+    task_id: str,
+    endpoint: str,
+    user_id: str = None,
+    prompt: str = None,
+    source_image_url: str = None
+):
     """
     Background task to complete image-to-3d processing.
-    This includes downloading, Blender post-processing, and STL conversion.
+    This includes downloading, Blender post-processing, STL conversion, and Supabase upload.
+
+    Args:
+        task_id: Meshy task ID
+        endpoint: Meshy API endpoint
+        user_id: User ID for Supabase integration (optional)
+        prompt: Prompt used for generation (optional)
+        source_image_url: Source image URL (optional)
     """
     from modelling_api import _complete_image_to_3d
 
     try:
-        logger.info("[BackgroundTask] Starting for task_id=%s", task_id)
-        result = await _complete_image_to_3d(task_id, endpoint)
+        logger.info("[BackgroundTask] Starting for task_id=%s, user_id=%s", task_id, user_id)
+        result = await _complete_image_to_3d(
+            task_id=task_id,
+            endpoint=endpoint,
+            user_id=user_id,
+            prompt=prompt,
+            source_image_url=source_image_url
+        )
         logger.info("[BackgroundTask] Completed for task_id=%s", task_id)
         return result
     except Exception as e:
@@ -32,15 +51,35 @@ async def process_image_to_3d_background(task_id: str, endpoint: str):
             del _background_tasks[task_id]
 
 
-async def process_text_to_3d_background(preview_task_id: str, endpoint: str, texture_prompt: str = None):
+async def process_text_to_3d_background(
+    preview_task_id: str,
+    endpoint: str,
+    texture_prompt: str = None,
+    user_id: str = None,
+    prompt: str = None
+):
     """
     Background task to complete text-to-3d processing.
+    This includes downloading, Blender post-processing, STL conversion, and Supabase upload.
+
+    Args:
+        preview_task_id: Meshy preview task ID
+        endpoint: Meshy API endpoint
+        texture_prompt: Optional texture prompt (unused in current implementation)
+        user_id: User ID for Supabase integration (optional)
+        prompt: Original text prompt used for generation (optional)
     """
     from modelling_api import _complete_text_to_3d_with_refine
 
     try:
-        logger.info("[BackgroundTask] Starting text-to-3d for task_id=%s", preview_task_id)
-        result = await _complete_text_to_3d_with_refine(preview_task_id, endpoint, texture_prompt)
+        logger.info("[BackgroundTask] Starting text-to-3d for task_id=%s, user_id=%s", preview_task_id, user_id)
+        result = await _complete_text_to_3d_with_refine(
+            preview_task_id=preview_task_id,
+            endpoint=endpoint,
+            texture_prompt=texture_prompt,
+            user_id=user_id,
+            prompt=prompt
+        )
         logger.info("[BackgroundTask] Completed text-to-3d for task_id=%s", preview_task_id)
         return result
     except Exception as e:

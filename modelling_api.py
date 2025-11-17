@@ -3,6 +3,7 @@ from typing import Any, Optional, Literal, Dict
 import logging
 import asyncio
 import time
+import uuid
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -36,6 +37,29 @@ try:
 except ImportError:
     BLENDER_AVAILABLE = False
     logger.warning("[BlenderIntegration] blender_processor not available")
+
+try:
+    from supabase_storage import upload_glb_to_storage, upload_stl_to_storage, upload_thumbnail_to_storage
+    from supabase_db import create_ai_model_record, update_model_to_completed, update_model_to_failed
+    from supabase_client import get_supabase_client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+    logger.warning("[SupabaseIntegration] Supabase modules not available")
+
+try:
+    from mqtt_notification import send_model_completion_notification, send_model_failure_notification
+    MQTT_AVAILABLE = True
+except ImportError:
+    MQTT_AVAILABLE = False
+    logger.warning("[MQTTIntegration] MQTT notification module not available")
+
+try:
+    from file_cleanup import cleanup_model_files
+    CLEANUP_AVAILABLE = True
+except ImportError:
+    CLEANUP_AVAILABLE = False
+    logger.warning("[CleanupIntegration] File cleanup module not available")
 
 
 MESHY_API_BASE = os.getenv("MESHY_API_BASE", "https://api.meshy.ai").rstrip("/")
@@ -193,120 +217,449 @@ class TaskStatusResponse(BaseModel):
 
 
 # ---------- Services ----------
-async def _complete_image_to_3d(task_id: str, endpoint: str) -> dict:
-    """Complete image-to-3d task, download result, and run Blender post-processing."""
-    task = await poll_until_done(endpoint, task_id)
-    result_url = pick_model_url(task)
-    logger.info("[MeshyDone] image_to_3d id=%s url=%s", task_id, result_url)
+async def _complete_image_to_3d(
+    task_id: str,
+    endpoint: str,
+    user_id: Optional[str] = None,
+    prompt: Optional[str] = None,
+    source_image_url: Optional[str] = None
+) -> dict:
+    """Complete image-to-3d task, download result, and run Blender post-processing.
 
-    if not result_url:
-        raise RuntimeError("No result_glb_url from image-to-3d task")
+    Args:
+        task_id: Meshy task ID
+        endpoint: Meshy API endpoint
+        user_id: User ID for Supabase integration (optional)
+        prompt: Prompt used for generation (optional)
+        source_image_url: Source image URL (optional)
 
-    result: dict = {
-        "task_id": task_id,
-        "result_glb_url": result_url,
-        "raw": task,
-    }
+    Returns:
+        dict with task_id, result_glb_url, local paths, and Supabase URLs if user_id provided
+    """
+    # Generate model_id for Supabase
+    model_id = str(uuid.uuid4())
+    supabase_client = None
 
-    # Download GLB file
-    local_glb_path = None
-    if OUTPUT_DIR and result_url:
-        local_glb_path = await maybe_download_result(
-            task_id,
-            result_url,
-            "SUCCEEDED",
-            f"model_{task_id}.glb"
-        )
+    # Create Supabase DB record if user_id provided
+    if user_id and SUPABASE_AVAILABLE:
+        try:
+            supabase_client = get_supabase_client()
+            create_ai_model_record(
+                user_id=user_id,
+                model_id=model_id,
+                generation_type="image_to_3d",
+                prompt=prompt,
+                source_image_url=source_image_url,
+                supabase=supabase_client
+            )
+            logger.info("[Supabase] Created DB record: model_id=%s, user_id=%s", model_id, user_id)
+        except Exception as e:
+            logger.error("[Supabase] Failed to create DB record: %s", str(e))
+            # Continue processing even if DB record creation fails
+
+    try:
+        task = await poll_until_done(endpoint, task_id)
+        result_url = pick_model_url(task)
+        logger.info("[MeshyDone] image_to_3d id=%s url=%s", task_id, result_url)
+
+        if not result_url:
+            raise RuntimeError("No result_glb_url from image-to-3d task")
+
+        result: dict = {
+            "task_id": task_id,
+            "model_id": model_id,
+            "result_glb_url": result_url,
+            "raw": task,
+        }
+
+        # Download GLB file
+        local_glb_path = None
+        if OUTPUT_DIR and result_url:
+            local_glb_path = await maybe_download_result(
+                task_id,
+                result_url,
+                "SUCCEEDED",
+                f"model_{task_id}.glb"
+            )
+            if local_glb_path:
+                logger.info("[DownloadOK] id=%s saved=%s", task_id, local_glb_path)
+                result["local_path"] = local_glb_path
+            else:
+                logger.warning("[DownloadSkip] id=%s reason=unknown (see utill.maybe_download_result)", task_id)
+        else:
+            if not OUTPUT_DIR:
+                logger.warning("[DownloadSkip] reason=OUTPUT_DIR unset")
+            elif not result_url:
+                logger.warning("[DownloadSkip] reason=no result_glb_url")
+
+        # Run Blender post-processing if GLB was downloaded
         if local_glb_path:
-            logger.info("[DownloadOK] id=%s saved=%s", task_id, local_glb_path)
-            result["local_path"] = local_glb_path
+            blender_result = await post_process_with_blender(local_glb_path, task_id)
+            if blender_result:
+                result["cleaned_glb_path"] = blender_result.get("cleaned_glb_path")
+                result["stl_path"] = blender_result.get("stl_path")
+                logger.info("[BlenderPostProcess] Success: GLB=%s, STL=%s",
+                           result.get("cleaned_glb_path"), result.get("stl_path"))
+            else:
+                logger.warning("[BlenderPostProcess] Skipped or failed for task_id=%s", task_id)
+
+        # Download thumbnail if available
+        thumbnail_url = task.get("thumbnail_url")
+        if thumbnail_url:
+            thumbnail_path = await download_thumbnail(thumbnail_url, task_id)
+            if thumbnail_path:
+                result["thumbnail_path"] = thumbnail_path
+                logger.info("[ThumbnailDownload] Success: %s", thumbnail_path)
+
+        # Upload to Supabase Storage if user_id provided
+        if user_id and SUPABASE_AVAILABLE and supabase_client:
+            try:
+                glb_upload_result = None
+                stl_upload_result = None
+                thumbnail_upload_result = None
+
+                # Upload cleaned GLB (preferred) or original GLB
+                glb_to_upload = result.get("cleaned_glb_path") or result.get("local_path")
+                if glb_to_upload:
+                    glb_upload_result = upload_glb_to_storage(
+                        user_id=user_id,
+                        model_id=model_id,
+                        glb_file_path=glb_to_upload,
+                        supabase=supabase_client
+                    )
+                    logger.info("[Supabase] GLB uploaded: %s", glb_upload_result.get("public_url"))
+                    result["supabase_glb_url"] = glb_upload_result.get("public_url")
+
+                # Upload STL if available
+                if result.get("stl_path"):
+                    stl_upload_result = upload_stl_to_storage(
+                        user_id=user_id,
+                        model_id=model_id,
+                        stl_file_path=result["stl_path"],
+                        supabase=supabase_client
+                    )
+                    logger.info("[Supabase] STL uploaded: %s", stl_upload_result.get("public_url"))
+                    result["supabase_stl_url"] = stl_upload_result.get("public_url")
+
+                # Upload thumbnail if available
+                if result.get("thumbnail_path"):
+                    thumbnail_upload_result = upload_thumbnail_to_storage(
+                        user_id=user_id,
+                        model_id=model_id,
+                        thumbnail_file_path=result["thumbnail_path"],
+                        supabase=supabase_client
+                    )
+                    logger.info("[Supabase] Thumbnail uploaded: %s", thumbnail_upload_result.get("public_url"))
+                    result["supabase_thumbnail_url"] = thumbnail_upload_result.get("public_url")
+
+                # Update DB record to completed
+                if glb_upload_result:
+                    update_model_to_completed(
+                        model_id=model_id,
+                        storage_path=glb_upload_result.get("path"),
+                        download_url=glb_upload_result.get("public_url"),
+                        thumbnail_url=thumbnail_upload_result.get("public_url") if thumbnail_upload_result else None,
+                        stl_storage_path=stl_upload_result.get("path") if stl_upload_result else None,
+                        stl_download_url=stl_upload_result.get("public_url") if stl_upload_result else None,
+                        file_size=glb_upload_result.get("size"),
+                        supabase=supabase_client
+                    )
+                    logger.info("[Supabase] DB record updated to completed: model_id=%s", model_id)
+
+                    # Send MQTT completion notification
+                    if MQTT_AVAILABLE:
+                        try:
+                            send_model_completion_notification(
+                                user_id=user_id,
+                                model_id=model_id,
+                                download_url=glb_upload_result.get("public_url"),
+                                thumbnail_url=thumbnail_upload_result.get("public_url") if thumbnail_upload_result else None,
+                                stl_download_url=stl_upload_result.get("public_url") if stl_upload_result else None,
+                                model_name=f"AI Model {model_id[:8]}",
+                                generation_type="image_to_3d"
+                            )
+                        except Exception as mqtt_error:
+                            logger.warning("[MQTT] Failed to send completion notification: %s", mqtt_error)
+
+                    # Cleanup local files after successful upload
+                    if CLEANUP_AVAILABLE:
+                        try:
+                            cleanup_model_files(
+                                glb_path=result.get("cleaned_glb_path"),
+                                stl_path=result.get("stl_path"),
+                                thumbnail_path=result.get("thumbnail_path"),
+                                source_image_path=source_image_url if source_image_url and os.path.exists(str(source_image_url)) else None
+                            )
+                        except Exception as cleanup_error:
+                            logger.warning("[Cleanup] Failed to cleanup local files: %s", cleanup_error)
+
+            except Exception as e:
+                logger.error("[Supabase] Failed to upload files or update DB: %s", str(e))
+                # Update to failed status
+                try:
+                    if supabase_client:
+                        update_model_to_failed(model_id, str(e), supabase=supabase_client)
+
+                        # Send MQTT failure notification
+                        if MQTT_AVAILABLE and user_id:
+                            try:
+                                send_model_failure_notification(
+                                    user_id=user_id,
+                                    model_id=model_id,
+                                    error_message=str(e),
+                                    generation_type="image_to_3d"
+                                )
+                            except:
+                                pass
+                except:
+                    pass
+
+        return result
+
+    except Exception as e:
+        # Update Supabase DB to failed if user_id provided
+        if user_id and SUPABASE_AVAILABLE and supabase_client:
+            try:
+                update_model_to_failed(model_id, str(e), supabase=supabase_client)
+                logger.error("[Supabase] DB record updated to failed: model_id=%s, error=%s", model_id, str(e))
+
+                # Send MQTT failure notification
+                if MQTT_AVAILABLE:
+                    try:
+                        send_model_failure_notification(
+                            user_id=user_id,
+                            model_id=model_id,
+                            error_message=str(e),
+                            generation_type="image_to_3d"
+                        )
+                    except Exception as mqtt_error:
+                        logger.warning("[MQTT] Failed to send failure notification: %s", mqtt_error)
+            except Exception as db_error:
+                logger.error("[Supabase] Failed to update DB to failed status: %s", str(db_error))
+        raise
+
+
+async def _complete_text_to_3d_with_refine(
+    preview_task_id: str,
+    endpoint: str,
+    texture_prompt: Optional[str] = None,
+    user_id: Optional[str] = None,
+    prompt: Optional[str] = None
+) -> dict:
+    """Complete text-to-3d preview task and download result (skip refine, go straight to Blender).
+
+    Args:
+        preview_task_id: Meshy preview task ID
+        endpoint: Meshy API endpoint
+        texture_prompt: Optional texture prompt (unused in current implementation)
+        user_id: User ID for Supabase integration (optional)
+        prompt: Original text prompt used for generation (optional)
+
+    Returns:
+        dict with task_id, result_glb_url, local paths, and Supabase URLs if user_id provided
+    """
+    # Generate model_id for Supabase
+    model_id = str(uuid.uuid4())
+    supabase_client = None
+
+    # Create Supabase DB record if user_id provided
+    if user_id and SUPABASE_AVAILABLE:
+        try:
+            supabase_client = get_supabase_client()
+            create_ai_model_record(
+                user_id=user_id,
+                model_id=model_id,
+                generation_type="text_to_3d",
+                prompt=prompt,
+                supabase=supabase_client
+            )
+            logger.info("[Supabase] Created DB record: model_id=%s, user_id=%s", model_id, user_id)
+        except Exception as e:
+            logger.error("[Supabase] Failed to create DB record: %s", str(e))
+            # Continue processing even if DB record creation fails
+
+    try:
+        # 1) Preview 완료까지 대기
+        preview_task = await poll_until_done(endpoint, preview_task_id)
+        preview_result_url = pick_model_url(preview_task)
+        logger.info("[MeshyDone] text_to_3d_preview id=%s url=%s (skipping refine)", preview_task_id, preview_result_url)
+
+        if not preview_result_url:
+            raise RuntimeError("No result_glb_url from text-to-3d preview task")
+
+        # 2) 결과 객체 생성
+        result: dict = {
+            "task_id": preview_task_id,
+            "model_id": model_id,
+            "result_glb_url": preview_result_url,
+            "raw": preview_task,
+        }
+
+        # 3) GLB 다운로드
+        local_glb_path = None
+        if OUTPUT_DIR and preview_result_url:
+            local_glb_path = await maybe_download_result(
+                preview_task_id,
+                preview_result_url,
+                "SUCCEEDED",
+                f"preview_{preview_task_id}.glb"
+            )
+            if local_glb_path:
+                logger.info("[DownloadOK] id=%s saved=%s", preview_task_id, local_glb_path)
+                result["local_path"] = local_glb_path
+            else:
+                logger.warning("[DownloadSkip] id=%s reason=unknown (see utill.maybe_download_result)", preview_task_id)
         else:
-            logger.warning("[DownloadSkip] id=%s reason=unknown (see utill.maybe_download_result)", task_id)
-    else:
-        if not OUTPUT_DIR:
-            logger.warning("[DownloadSkip] reason=OUTPUT_DIR unset")
-        elif not result_url:
-            logger.warning("[DownloadSkip] reason=no result_glb_url")
+            if not OUTPUT_DIR:
+                logger.warning("[DownloadSkip] reason=OUTPUT_DIR unset")
+            elif not preview_result_url:
+                logger.warning("[DownloadSkip] reason=no result_glb_url")
 
-    # Run Blender post-processing if GLB was downloaded
-    if local_glb_path:
-        blender_result = await post_process_with_blender(local_glb_path, task_id)
-        if blender_result:
-            result["cleaned_glb_path"] = blender_result.get("cleaned_glb_path")
-            result["stl_path"] = blender_result.get("stl_path")
-            logger.info("[BlenderPostProcess] Success: GLB=%s, STL=%s",
-                       result.get("cleaned_glb_path"), result.get("stl_path"))
-        else:
-            logger.warning("[BlenderPostProcess] Skipped or failed for task_id=%s", task_id)
-
-    # Download thumbnail if available
-    thumbnail_url = task.get("thumbnail_url")
-    if thumbnail_url:
-        thumbnail_path = await download_thumbnail(thumbnail_url, task_id)
-        if thumbnail_path:
-            result["thumbnail_path"] = thumbnail_path
-            logger.info("[ThumbnailDownload] Success: %s", thumbnail_path)
-
-    return result
-
-
-async def _complete_text_to_3d_with_refine(preview_task_id: str, endpoint: str, texture_prompt: Optional[str] = None) -> dict:
-    """Complete text-to-3d preview task and download result (skip refine, go straight to Blender)."""
-    # 1) Preview 완료까지 대기
-    preview_task = await poll_until_done(endpoint, preview_task_id)
-    preview_result_url = pick_model_url(preview_task)
-    logger.info("[MeshyDone] text_to_3d_preview id=%s url=%s (skipping refine)", preview_task_id, preview_result_url)
-
-    if not preview_result_url:
-        raise RuntimeError("No result_glb_url from text-to-3d preview task")
-
-    # 2) 결과 객체 생성
-    result: dict = {
-        "task_id": preview_task_id,
-        "result_glb_url": preview_result_url,
-        "raw": preview_task,
-    }
-
-    # 3) GLB 다운로드
-    local_glb_path = None
-    if OUTPUT_DIR and preview_result_url:
-        local_glb_path = await maybe_download_result(
-            preview_task_id,
-            preview_result_url,
-            "SUCCEEDED",
-            f"preview_{preview_task_id}.glb"
-        )
+        # 4) Blender 후처리 실행
         if local_glb_path:
-            logger.info("[DownloadOK] id=%s saved=%s", preview_task_id, local_glb_path)
-            result["local_path"] = local_glb_path
-        else:
-            logger.warning("[DownloadSkip] id=%s reason=unknown (see utill.maybe_download_result)", preview_task_id)
-    else:
-        if not OUTPUT_DIR:
-            logger.warning("[DownloadSkip] reason=OUTPUT_DIR unset")
-        elif not preview_result_url:
-            logger.warning("[DownloadSkip] reason=no result_glb_url")
+            blender_result = await post_process_with_blender(local_glb_path, preview_task_id)
+            if blender_result:
+                result["cleaned_glb_path"] = blender_result.get("cleaned_glb_path")
+                result["stl_path"] = blender_result.get("stl_path")
+                logger.info("[BlenderPostProcess] Success: GLB=%s, STL=%s",
+                           result.get("cleaned_glb_path"), result.get("stl_path"))
+            else:
+                logger.warning("[BlenderPostProcess] Skipped or failed for task_id=%s", preview_task_id)
 
-    # 4) Blender 후처리 실행
-    if local_glb_path:
-        blender_result = await post_process_with_blender(local_glb_path, preview_task_id)
-        if blender_result:
-            result["cleaned_glb_path"] = blender_result.get("cleaned_glb_path")
-            result["stl_path"] = blender_result.get("stl_path")
-            logger.info("[BlenderPostProcess] Success: GLB=%s, STL=%s",
-                       result.get("cleaned_glb_path"), result.get("stl_path"))
-        else:
-            logger.warning("[BlenderPostProcess] Skipped or failed for task_id=%s", preview_task_id)
+        # 5) 썸네일 다운로드
+        thumbnail_url = preview_task.get("thumbnail_url")
+        if thumbnail_url:
+            thumbnail_path = await download_thumbnail(thumbnail_url, preview_task_id)
+            if thumbnail_path:
+                result["thumbnail_path"] = thumbnail_path
+                logger.info("[ThumbnailDownload] Success: %s", thumbnail_path)
 
-    # 5) 썸네일 다운로드
-    thumbnail_url = preview_task.get("thumbnail_url")
-    if thumbnail_url:
-        thumbnail_path = await download_thumbnail(thumbnail_url, preview_task_id)
-        if thumbnail_path:
-            result["thumbnail_path"] = thumbnail_path
-            logger.info("[ThumbnailDownload] Success: %s", thumbnail_path)
+        # 6) Upload to Supabase Storage if user_id provided
+        if user_id and SUPABASE_AVAILABLE and supabase_client:
+            try:
+                glb_upload_result = None
+                stl_upload_result = None
+                thumbnail_upload_result = None
 
-    return result
+                # Upload cleaned GLB (preferred) or original GLB
+                glb_to_upload = result.get("cleaned_glb_path") or result.get("local_path")
+                if glb_to_upload:
+                    glb_upload_result = upload_glb_to_storage(
+                        user_id=user_id,
+                        model_id=model_id,
+                        glb_file_path=glb_to_upload,
+                        supabase=supabase_client
+                    )
+                    logger.info("[Supabase] GLB uploaded: %s", glb_upload_result.get("public_url"))
+                    result["supabase_glb_url"] = glb_upload_result.get("public_url")
+
+                # Upload STL if available
+                if result.get("stl_path"):
+                    stl_upload_result = upload_stl_to_storage(
+                        user_id=user_id,
+                        model_id=model_id,
+                        stl_file_path=result["stl_path"],
+                        supabase=supabase_client
+                    )
+                    logger.info("[Supabase] STL uploaded: %s", stl_upload_result.get("public_url"))
+                    result["supabase_stl_url"] = stl_upload_result.get("public_url")
+
+                # Upload thumbnail if available
+                if result.get("thumbnail_path"):
+                    thumbnail_upload_result = upload_thumbnail_to_storage(
+                        user_id=user_id,
+                        model_id=model_id,
+                        thumbnail_file_path=result["thumbnail_path"],
+                        supabase=supabase_client
+                    )
+                    logger.info("[Supabase] Thumbnail uploaded: %s", thumbnail_upload_result.get("public_url"))
+                    result["supabase_thumbnail_url"] = thumbnail_upload_result.get("public_url")
+
+                # Update DB record to completed
+                if glb_upload_result:
+                    update_model_to_completed(
+                        model_id=model_id,
+                        storage_path=glb_upload_result.get("path"),
+                        download_url=glb_upload_result.get("public_url"),
+                        thumbnail_url=thumbnail_upload_result.get("public_url") if thumbnail_upload_result else None,
+                        stl_storage_path=stl_upload_result.get("path") if stl_upload_result else None,
+                        stl_download_url=stl_upload_result.get("public_url") if stl_upload_result else None,
+                        file_size=glb_upload_result.get("size"),
+                        supabase=supabase_client
+                    )
+                    logger.info("[Supabase] DB record updated to completed: model_id=%s", model_id)
+
+                    # Send MQTT completion notification
+                    if MQTT_AVAILABLE:
+                        try:
+                            send_model_completion_notification(
+                                user_id=user_id,
+                                model_id=model_id,
+                                download_url=glb_upload_result.get("public_url"),
+                                thumbnail_url=thumbnail_upload_result.get("public_url") if thumbnail_upload_result else None,
+                                stl_download_url=stl_upload_result.get("public_url") if stl_upload_result else None,
+                                model_name=f"AI Model {model_id[:8]}",
+                                generation_type="image_to_3d"
+                            )
+                        except Exception as mqtt_error:
+                            logger.warning("[MQTT] Failed to send completion notification: %s", mqtt_error)
+
+                    # Cleanup local files after successful upload
+                    if CLEANUP_AVAILABLE:
+                        try:
+                            cleanup_model_files(
+                                glb_path=result.get("cleaned_glb_path"),
+                                stl_path=result.get("stl_path"),
+                                thumbnail_path=result.get("thumbnail_path"),
+                                source_image_path=source_image_url if source_image_url and os.path.exists(str(source_image_url)) else None
+                            )
+                        except Exception as cleanup_error:
+                            logger.warning("[Cleanup] Failed to cleanup local files: %s", cleanup_error)
+
+            except Exception as e:
+                logger.error("[Supabase] Failed to upload files or update DB: %s", str(e))
+                # Update to failed status
+                try:
+                    if supabase_client:
+                        update_model_to_failed(model_id, str(e), supabase=supabase_client)
+
+                        # Send MQTT failure notification
+                        if MQTT_AVAILABLE and user_id:
+                            try:
+                                send_model_failure_notification(
+                                    user_id=user_id,
+                                    model_id=model_id,
+                                    error_message=str(e),
+                                    generation_type="image_to_3d"
+                                )
+                            except:
+                                pass
+                except:
+                    pass
+
+        return result
+
+    except Exception as e:
+        # Update Supabase DB to failed if user_id provided
+        if user_id and SUPABASE_AVAILABLE and supabase_client:
+            try:
+                update_model_to_failed(model_id, str(e), supabase=supabase_client)
+                logger.error("[Supabase] DB record updated to failed: model_id=%s, error=%s", model_id, str(e))
+
+                # Send MQTT failure notification
+                if MQTT_AVAILABLE:
+                    try:
+                        send_model_failure_notification(
+                            user_id=user_id,
+                            model_id=model_id,
+                            error_message=str(e),
+                            generation_type="image_to_3d"
+                        )
+                    except Exception as mqtt_error:
+                        logger.warning("[MQTT] Failed to send failure notification: %s", mqtt_error)
+            except Exception as db_error:
+                logger.error("[Supabase] Failed to update DB to failed status: %s", str(db_error))
+        raise
 
 
 async def start_text_to_3d_preview(prompt: str, art_style: Optional[str] = None, ai_model: Optional[str] = None) -> dict:
