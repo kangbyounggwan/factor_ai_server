@@ -125,8 +125,12 @@ class StorageUploader:
                 file_options={"content-type": "image/jpeg"}
             )
 
-            # Get public URL
-            public_url = self.client.storage.from_("failure-frames").get_public_url(file_path)
+            # Get signed URL (valid for 1 year for long-term access)
+            signed_url_response = self.client.storage.from_("failure-frames").create_signed_url(
+                file_path,
+                expires_in=31536000  # 1 year in seconds
+            )
+            public_url = signed_url_response.get('signedURL', '')
 
             logger.info(f"[Storage] Uploaded {file_type} frame: {file_path}")
 
@@ -191,8 +195,12 @@ class StorageUploader:
                 file_options={"content-type": "video/mp4"}
             )
 
-            # Get public URL
-            public_url = self.client.storage.from_("failure-videos").get_public_url(file_path)
+            # Get signed URL (valid for 1 year)
+            signed_url_response = self.client.storage.from_("failure-videos").create_signed_url(
+                file_path,
+                expires_in=31536000  # 1 year
+            )
+            public_url = signed_url_response.get('signedURL', '')
 
             # Cleanup temp file
             os.remove(temp_path)

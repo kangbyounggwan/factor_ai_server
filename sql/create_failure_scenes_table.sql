@@ -145,7 +145,7 @@ CREATE TRIGGER trigger_update_failure_scenes_updated_at
 -- Storage Buckets Setup
 -- ============================================================================
 
--- Create storage buckets for failure scene media
+-- Create storage buckets for failure scene media (private for security)
 INSERT INTO storage.buckets (id, name, public)
 VALUES
     ('failure-frames', 'failure-frames', false),
@@ -154,43 +154,29 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- Storage policies for failure frames
-CREATE POLICY "Users can view own failure frames"
-    ON storage.objects FOR SELECT
-    USING (bucket_id = 'failure-frames' AND (storage.foldername(name))[1] = auth.uid()::text);
+-- Note: Only service role can access (for AI training, no user access needed)
+DROP POLICY IF EXISTS "Service role only for failure frames" ON storage.objects;
 
-CREATE POLICY "Service can upload failure frames"
-    ON storage.objects FOR INSERT
+CREATE POLICY "Service role only for failure frames"
+    ON storage.objects FOR ALL
+    USING (bucket_id = 'failure-frames')
     WITH CHECK (bucket_id = 'failure-frames');
 
-CREATE POLICY "Users can delete own failure frames"
-    ON storage.objects FOR DELETE
-    USING (bucket_id = 'failure-frames' AND (storage.foldername(name))[1] = auth.uid()::text);
-
 -- Storage policies for failure videos
-CREATE POLICY "Users can view own failure videos"
-    ON storage.objects FOR SELECT
-    USING (bucket_id = 'failure-videos' AND (storage.foldername(name))[1] = auth.uid()::text);
+DROP POLICY IF EXISTS "Service role only for failure videos" ON storage.objects;
 
-CREATE POLICY "Service can upload failure videos"
-    ON storage.objects FOR INSERT
+CREATE POLICY "Service role only for failure videos"
+    ON storage.objects FOR ALL
+    USING (bucket_id = 'failure-videos')
     WITH CHECK (bucket_id = 'failure-videos');
 
-CREATE POLICY "Users can delete own failure videos"
-    ON storage.objects FOR DELETE
-    USING (bucket_id = 'failure-videos' AND (storage.foldername(name))[1] = auth.uid()::text);
-
 -- Storage policies for failure masks
-CREATE POLICY "Users can view own failure masks"
-    ON storage.objects FOR SELECT
-    USING (bucket_id = 'failure-masks' AND (storage.foldername(name))[1] = auth.uid()::text);
+DROP POLICY IF EXISTS "Service role only for failure masks" ON storage.objects;
 
-CREATE POLICY "Service can upload failure masks"
-    ON storage.objects FOR INSERT
+CREATE POLICY "Service role only for failure masks"
+    ON storage.objects FOR ALL
+    USING (bucket_id = 'failure-masks')
     WITH CHECK (bucket_id = 'failure-masks');
-
-CREATE POLICY "Users can delete own failure masks"
-    ON storage.objects FOR DELETE
-    USING (bucket_id = 'failure-masks' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 -- ============================================================================
 -- Sample Query Examples

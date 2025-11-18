@@ -276,8 +276,8 @@ async def main():
     TEST_USER_ID = "00000000-0000-0000-0000-000000000000"
     TEST_DEVICE_UUID = "test-device-live-stream"
 
-    # Detection threshold (0.9 = 90% confidence required)
-    CONF_THRESHOLD = 0.90
+    # Detection threshold (0.7 = 70% confidence required for testing)
+    CONF_THRESHOLD = 0.70
 
     # GPT Analysis (WARNING: costs money on each detection!)
     ENABLE_GPT = False  # Set to True to enable GPT Vision analysis
