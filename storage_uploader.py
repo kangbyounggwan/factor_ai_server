@@ -17,10 +17,13 @@ import io
 
 import cv2
 import numpy as np
+import httpx
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from script directory
+env_path = Path(__file__).parent / '.env'
+load_dotenv(env_path, override=True)
 
 logger = logging.getLogger(__name__)
 
@@ -118,19 +121,41 @@ class StorageUploader:
             # Generate file path
             file_path = self._generate_file_path(user_id, device_uuid, file_type, "jpg")
 
-            # Upload to Supabase Storage
-            result = self.client.storage.from_("failure-frames").upload(
-                path=file_path,
-                file=encoded.tobytes(),
-                file_options={"content-type": "image/jpeg"}
-            )
+            # Upload using direct HTTP request (workaround for SDK auth issues)
+            upload_url = f"{self.supabase_url}/storage/v1/object/failure-frames/{file_path}"
+
+            headers = {
+                "Authorization": f"Bearer {self.supabase_key}",
+                "Content-Type": "image/jpeg",
+                "apikey": self.supabase_key
+            }
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    upload_url,
+                    content=encoded.tobytes(),
+                    headers=headers,
+                    timeout=30.0
+                )
+
+                if response.status_code not in [200, 201]:
+                    raise Exception(f"Upload failed: {response.json()}")
 
             # Get signed URL (valid for 1 year for long-term access)
-            signed_url_response = self.client.storage.from_("failure-frames").create_signed_url(
-                file_path,
-                expires_in=31536000  # 1 year in seconds
-            )
-            public_url = signed_url_response.get('signedURL', '')
+            signed_url = f"{self.supabase_url}/storage/v1/object/sign/failure-frames/{file_path}"
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    signed_url,
+                    json={"expiresIn": 31536000},
+                    headers=headers,
+                    timeout=10.0
+                )
+
+                if response.status_code == 200:
+                    signed_data = response.json()
+                    public_url = f"{self.supabase_url}/storage/v1{signed_data.get('signedURL', '')}"
+                else:
+                    public_url = ""
 
             logger.info(f"[Storage] Uploaded {file_type} frame: {file_path}")
 
