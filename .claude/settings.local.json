@@ -11,7 +11,12 @@
       "Read(//c/Program Files/UltiMaker Cura 5.7.1/share/cura/resources/definitions/**)",
       "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\" test_all_printers.py)",
       "Bash(pkill:*)",
-      "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\" test_cura_direct.py)"
+      "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\" test_cura_direct.py)",
+      "Bash(for f in c:/Users/USER/factor_AI_python/output/*.gcode)",
+      "Bash(tail:*)",
+      "Bash(done)",
+      "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\" -c:*)",
+      "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\" test_live_stream.py)"
     ],
     "deny": [],
     "ask": []

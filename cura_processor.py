@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 import json
 from pathlib import Path
+import time
 from typing import Optional, Tuple, Dict
 
 logger = logging.getLogger("uvicorn.error")
@@ -182,6 +183,8 @@ async def run_curaengine_process(
     Returns:
         Tuple[success: bool, log_output: str]
     """
+    start_time = time.time()
+
     logger.info("[Cura] ===== Starting CuraEngine Slicing =====")
     logger.info("[Cura] Input STL: %s (exists: %s)", stl_path, stl_path.exists())
     logger.info("[Cura] Output G-code: %s", gcode_path)
@@ -286,6 +289,10 @@ async def run_curaengine_process(
             # Parse slicing statistics from log
             stats = parse_slicing_stats(log_output)
             logger.info("[Cura] Slicing stats: %s", stats)
+
+            
+            elapsed_time = time.time() - start_time
+            logger.info("[Cura] Total slicing time: %.2f seconds (%.1f minutes)", elapsed_time, elapsed_time / 60.0)
 
             logger.info("[Cura] ===== Slicing Successful =====")
             return True, log_output
