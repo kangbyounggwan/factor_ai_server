@@ -395,7 +395,7 @@ async def _complete_image_to_3d(
 
             except Exception as e:
                 logger.error("[Supabase] Failed to upload files or update DB: %s", str(e))
-                # Update to failed status
+                # Update to failed status and re-raise to prevent returning success
                 try:
                     if supabase_client:
                         update_model_to_failed(model_id, str(e), supabase=supabase_client)
@@ -413,6 +413,8 @@ async def _complete_image_to_3d(
                                 pass
                 except:
                     pass
+                # Re-raise to prevent returning successful result after FAILED notification
+                raise RuntimeError(f"[image_to_3d] Supabase upload failed: {e}")
 
         return result
 
@@ -599,7 +601,7 @@ async def _complete_text_to_3d_with_refine(
                                 thumbnail_url=thumbnail_upload_result.get("public_url") if thumbnail_upload_result else None,
                                 stl_download_url=stl_upload_result.get("public_url") if stl_upload_result else None,
                                 model_name=f"AI Model {model_id[:8]}",
-                                generation_type="image_to_3d"
+                                generation_type="text_to_3d"
                             )
                         except Exception as mqtt_error:
                             logger.warning("[MQTT] Failed to send completion notification: %s", mqtt_error)
@@ -610,15 +612,14 @@ async def _complete_text_to_3d_with_refine(
                             cleanup_model_files(
                                 glb_path=result.get("cleaned_glb_path"),
                                 stl_path=result.get("stl_path"),
-                                thumbnail_path=result.get("thumbnail_path"),
-                                source_image_path=source_image_url if source_image_url and os.path.exists(str(source_image_url)) else None
+                                thumbnail_path=result.get("thumbnail_path")
                             )
                         except Exception as cleanup_error:
                             logger.warning("[Cleanup] Failed to cleanup local files: %s", cleanup_error)
 
             except Exception as e:
                 logger.error("[Supabase] Failed to upload files or update DB: %s", str(e))
-                # Update to failed status
+                # Update to failed status and re-raise to prevent returning success
                 try:
                     if supabase_client:
                         update_model_to_failed(model_id, str(e), supabase=supabase_client)
@@ -630,12 +631,14 @@ async def _complete_text_to_3d_with_refine(
                                     user_id=user_id,
                                     model_id=model_id,
                                     error_message=str(e),
-                                    generation_type="image_to_3d"
+                                    generation_type="text_to_3d"
                                 )
                             except:
                                 pass
                 except:
                     pass
+                # Re-raise to prevent returning successful result after FAILED notification
+                raise RuntimeError(f"[text_to_3d] Supabase upload failed: {e}")
 
         return result
 
@@ -653,7 +656,7 @@ async def _complete_text_to_3d_with_refine(
                             user_id=user_id,
                             model_id=model_id,
                             error_message=str(e),
-                            generation_type="image_to_3d"
+                            generation_type="text_to_3d"
                         )
                     except Exception as mqtt_error:
                         logger.warning("[MQTT] Failed to send failure notification: %s", mqtt_error)
