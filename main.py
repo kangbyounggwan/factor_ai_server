@@ -31,6 +31,9 @@ from blender_processor import process_model_with_blender, is_blender_available
 from background_tasks import start_background_task, process_image_to_3d_background
 from auth import extract_user_id_from_token
 
+# G-code 분석 라우터 import
+from gcode_analyzer.api.router import router as gcode_router
+
 ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS_RAW.split(",")] if ALLOWED_ORIGINS_RAW else ["*"]
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:7000").rstrip("/")
@@ -40,14 +43,17 @@ logger.info(f"[CORS] ALLOWED_ORIGINS loaded: {ALLOWED_ORIGINS}")
 
 app = FastAPI(title="Factor AI Proxy API", version="0.1.0")
 
-# CORS is now handled by NGINX to avoid duplicate headers
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
+# G-code 분석 API 라우터 등록
+app.include_router(gcode_router)
+
+# CORS 설정 (개발 환경용 - 프로덕션에서는 NGINX에서 처리)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Note: /files endpoint is now handled by custom download_file_with_tracking()
 # to support auto-deletion after download

@@ -3,7 +3,7 @@ uvicorn[standard]==0.31.0
 httpx==0.28.1
 python-multipart==0.0.9
 python-dotenv==1.0.1
-pydantic==2.12.4
+pydantic>=2.7.4
 trimesh==4.5.3
 supabase==2.24.0
 websockets==15.0.1
@@ -13,3 +13,8 @@ openai>=1.0.0
 opencv-python>=4.8.0
 numpy>=1.24.0
 
+# G-code Analyzer (LangGraph + Gemini)
+langgraph>=1.0.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
