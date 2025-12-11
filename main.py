@@ -92,13 +92,13 @@ async def health():
     return ApiResponse(status="ok", data={"service": "alive"})
 
 
-@app.options("/ai/v1/process/modelling")
+@app.options("/v1/process/modelling")
 async def options_process_modelling():
     """Handle CORS preflight for process_modelling endpoint"""
     return JSONResponse(content={}, status_code=200)
 
 
-@app.post("/ai/v1/process/modelling", response_model=ApiResponse)
+@app.post("/v1/process/modelling", response_model=ApiResponse)
 async def process_modelling(request: Request, async_mode: bool = False):
     """
     Process 3D modelling request.

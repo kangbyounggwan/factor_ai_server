@@ -21,7 +21,7 @@ from gcode_analyzer.rate_limiter import (
 
 logger = logging.getLogger("uvicorn.error")
 
-router = APIRouter(prefix="/ai/api/v1/gcode", tags=["G-code Analyzer"])
+router = APIRouter(prefix="/api/v1/gcode", tags=["G-code Analyzer"])
 
 # ============================================================
 # Request/Response Models
@@ -196,10 +196,27 @@ def _create_dashboard_response(analysis_id: str, data: Dict[str, Any]) -> Dashbo
     )
 
 # ============================================================
-# In-Memory Storage (프로덕션에서는 Redis/DB 사용)
+# File-Based Storage (멀티 워커 환경에서 상태 공유)
 # ============================================================
 
-gcode_analysis_store: Dict[str, Dict[str, Any]] = {}
+from gcode_analyzer.api.file_store import gcode_analysis_store, get_analysis, set_analysis, update_analysis, exists, delete_analysis
+
+
+def _cleanup_temp_files(analysis_id: str, temp_file: Optional[str] = None):
+    """분석 완료 후 임시 파일 및 상태 파일 정리"""
+    # 임시 G-code 파일 삭제
+    if temp_file and os.path.exists(temp_file):
+        try:
+            os.remove(temp_file)
+            logger.info(f"[GCode] Deleted temp file: {temp_file}")
+        except Exception as e:
+            logger.warning(f"[GCode] Failed to delete temp file {temp_file}: {e}")
+
+    # 상태 JSON 파일 삭제
+    if delete_analysis(analysis_id):
+        logger.info(f"[GCode] Deleted analysis state: {analysis_id}")
+    else:
+        logger.warning(f"[GCode] Failed to delete analysis state: {analysis_id}")
 
 # ============================================================
 # API Endpoints
@@ -321,8 +338,8 @@ async def analyze_gcode_json(request: GCodeAnalysisRequest, background_tasks: Ba
     with open(temp_file_path, 'w', encoding='utf-8') as f:
         f.write(request.gcode_content)
 
-    # 분석 상태 초기화
-    gcode_analysis_store[analysis_id] = {
+    # 분석 상태 초기화 (파일 저장소에 저장)
+    initial_data = {
         "status": "pending",
         "progress": 0.0,
         "current_step": "initializing",
@@ -336,6 +353,7 @@ async def analyze_gcode_json(request: GCodeAnalysisRequest, background_tasks: Ba
         "error": None,
         "created_at": datetime.now().isoformat()
     }
+    set_analysis(analysis_id, initial_data)
 
     logger.info(f"[GCode] Analysis started: {analysis_id} (lang={request.language}, tokens={estimated_tokens})")
 
@@ -399,8 +417,8 @@ async def analyze_gcode_summary_only(request: GCodeSummaryRequest, background_ta
     with open(temp_file_path, 'w', encoding='utf-8') as f:
         f.write(request.gcode_content)
 
-    # 분석 상태 초기화
-    gcode_analysis_store[analysis_id] = {
+    # 분석 상태 초기화 (파일 저장소에 저장)
+    initial_data = {
         "status": "pending",
         "progress": 0.0,
         "current_step": "initializing",
@@ -416,6 +434,7 @@ async def analyze_gcode_summary_only(request: GCodeSummaryRequest, background_ta
         "error": None,
         "created_at": datetime.now().isoformat()
     }
+    set_analysis(analysis_id, initial_data)
 
     logger.info(f"[GCode] Summary analysis started: {analysis_id} (lang={request.language})")
 
@@ -438,10 +457,10 @@ async def get_gcode_summary(analysis_id: str):
 
     온도, 피드, 서포트 비율, 예상 출력 시간 등의 요약 정보 반환
     """
-    if analysis_id not in gcode_analysis_store:
+    if not exists(analysis_id):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
 
-    data = gcode_analysis_store[analysis_id]
+    data = get_analysis(analysis_id)
 
     if data["status"] not in ["completed", "summary_completed"]:
         return {
@@ -488,10 +507,10 @@ async def get_gcode_dashboard(analysis_id: str):
     }
     ```
     """
-    if analysis_id not in gcode_analysis_store:
+    if not exists(analysis_id):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
 
-    data = gcode_analysis_store[analysis_id]
+    data = get_analysis(analysis_id)
 
     if data["status"] not in ["completed", "summary_completed"]:
         raise HTTPException(
@@ -510,18 +529,18 @@ async def get_gcode_dashboard(analysis_id: str):
 async def run_error_analysis(analysis_id: str, background_tasks: BackgroundTasks):
     """
     기존 요약 기반으로 에러 분석 실행
-    
+
     이미 요약 분석이 완료된 경우, 추가로 에러 분석을 실행합니다.
     LLM을 사용하여 문제를 분석하고 패치를 제안합니다.
     """
-    if analysis_id not in gcode_analysis_store:
+    if not exists(analysis_id):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
-    
-    data = gcode_analysis_store[analysis_id]
-    
+
+    data = get_analysis(analysis_id)
+
     if data["status"] not in ["completed", "summary_completed"]:
         raise HTTPException(status_code=400, detail="요약 분석이 완료되지 않았습니다. 먼저 요약 분석을 실행하세요.")
-    
+
     if data.get("analysis_mode") == "full" and data["status"] == "completed":
         return {
             "analysis_id": analysis_id,
@@ -529,11 +548,13 @@ async def run_error_analysis(analysis_id: str, background_tasks: BackgroundTasks
             "message": "이미 전체 분석이 완료되었습니다.",
             "result": data.get("result")
         }
-    
+
     # 에러 분석 모드로 전환
-    data["status"] = "running_error_analysis"
-    data["analysis_mode"] = "error_analysis"
-    
+    update_analysis(analysis_id, {
+        "status": "running_error_analysis",
+        "analysis_mode": "error_analysis"
+    })
+
     logger.info(f"[GCode] Error analysis started: {analysis_id}")
     
     # 백그라운드에서 에러 분석 실행
@@ -550,10 +571,10 @@ async def run_error_analysis(analysis_id: str, background_tasks: BackgroundTasks
 @router.get("/analysis/{analysis_id}")
 async def get_gcode_analysis_status(analysis_id: str):
     """분석 상태 조회"""
-    if analysis_id not in gcode_analysis_store:
+    if not exists(analysis_id):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
 
-    data = gcode_analysis_store[analysis_id]
+    data = get_analysis(analysis_id)
     return {
         "analysis_id": analysis_id,
         "status": data["status"],
@@ -569,19 +590,21 @@ async def get_gcode_analysis_status(analysis_id: str):
 async def stream_gcode_analysis(analysis_id: str):
     """
     SSE 스트리밍으로 분석 진행 상황 전송
-    
+
     EventSource로 연결하여 실시간 진행 상황 수신
     """
-    if analysis_id not in gcode_analysis_store:
+    if not exists(analysis_id):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
-    
+
     async def event_generator():
         last_step = 0
         while True:
-            if analysis_id not in gcode_analysis_store:
+            if not exists(analysis_id):
                 break
-            
-            data = gcode_analysis_store[analysis_id]
+
+            data = get_analysis(analysis_id)
+            if data is None:
+                break
             timeline = data.get("timeline", [])
             
             # 새로운 타임라인 이벤트 전송
@@ -622,38 +645,38 @@ async def stream_gcode_analysis(analysis_id: str):
 async def approve_gcode_patch(analysis_id: str, request: PatchApprovalRequest, background_tasks: BackgroundTasks):
     """
     패치 승인/거부
-    
+
     - approved: True면 패치 적용, False면 거부
     - selected_patches: 적용할 패치 인덱스 목록 (선택적)
     """
-    if analysis_id not in gcode_analysis_store:
+    if not exists(analysis_id):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
-    
-    data = gcode_analysis_store[analysis_id]
-    
+
+    data = get_analysis(analysis_id)
+
     if data["status"] != "completed":
         raise HTTPException(status_code=400, detail="분석이 완료되지 않았습니다.")
-    
+
     if not request.approved:
-        data["patch_status"] = "rejected"
+        update_analysis(analysis_id, {"patch_status": "rejected"})
         logger.info(f"[GCode] Patch rejected: {analysis_id}")
         return {"status": "rejected", "message": "패치가 거부되었습니다."}
-    
+
     # 패치 적용
     background_tasks.add_task(apply_gcode_patches_task, analysis_id, request.selected_patches)
-    
-    data["patch_status"] = "applying"
+
+    update_analysis(analysis_id, {"patch_status": "applying"})
     logger.info(f"[GCode] Patch applying: {analysis_id}")
     return {"status": "applying", "message": "패치를 적용하고 있습니다."}
 
 @router.get("/analysis/{analysis_id}/download")
 async def download_patched_gcode(analysis_id: str):
     """수정된 G-code 다운로드"""
-    if analysis_id not in gcode_analysis_store:
+    if not exists(analysis_id):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
-    
-    data = gcode_analysis_store[analysis_id]
-    
+
+    data = get_analysis(analysis_id)
+
     if data.get("patch_status") != "applied":
         raise HTTPException(status_code=400, detail="패치가 적용되지 않았습니다.")
     
@@ -680,16 +703,17 @@ def create_progress_callback(analysis_id: str):
     """
     분석 ID에 대한 progress 콜백 생성
 
-    콜백이 호출되면 gcode_analysis_store가 실시간으로 업데이트됨
+    콜백이 호출되면 파일 저장소가 실시간으로 업데이트됨
     """
     from gcode_analyzer.workflow.callback import ProgressUpdate
 
     def callback(update: ProgressUpdate):
-        if analysis_id in gcode_analysis_store:
-            data = gcode_analysis_store[analysis_id]
-            data["progress"] = update.progress
-            data["current_step"] = update.step
-            data["progress_message"] = update.message
+        if exists(analysis_id):
+            update_analysis(analysis_id, {
+                "progress": update.progress,
+                "current_step": update.step,
+                "progress_message": update.message
+            })
             logger.debug(f"[GCode] {analysis_id}: {update.progress:.0%} - {update.message}")
 
     return callback
@@ -699,8 +723,12 @@ async def run_gcode_analysis_task(analysis_id: str):
     """백그라운드에서 G-code 분석 실행"""
     from gcode_analyzer.analyzer import run_analysis
 
-    data = gcode_analysis_store[analysis_id]
-    data["status"] = "running"
+    data = get_analysis(analysis_id)
+    if data is None:
+        logger.error(f"[GCode] Analysis not found: {analysis_id}")
+        return
+
+    update_analysis(analysis_id, {"status": "running"})
 
     # Progress 콜백 생성
     progress_callback = create_progress_callback(analysis_id)
@@ -719,54 +747,64 @@ async def run_gcode_analysis_task(analysis_id: str):
         )
 
         # 결과 저장
-        data["status"] = "completed"
-        data["progress"] = 1.0
-        data["current_step"] = "completed"
-        data["progress_message"] = "분석 완료"
-        data["result"] = {
-            "final_summary": result.get("final_summary", {}),
-            "issues_found": result.get("issues_found", []),
-            "patch_plan": result.get("patch_plan"),
-            "timeline": result.get("timeline", []),
-            "token_usage": result.get("token_usage", {}),
+        update_analysis(analysis_id, {
+            "status": "completed",
+            "progress": 1.0,
+            "current_step": "completed",
+            "progress_message": "분석 완료",
+            "result": {
+                "final_summary": result.get("final_summary", {}),
+                "issues_found": result.get("issues_found", []),
+                "patch_plan": result.get("patch_plan"),
+                "timeline": result.get("timeline", []),
+                "token_usage": result.get("token_usage", {}),
+                "comprehensive_summary": result.get("comprehensive_summary"),
+                "printing_info": result.get("printing_info", {})  # LLM 프린팅 요약 추가
+            },
             "comprehensive_summary": result.get("comprehensive_summary"),
-            "printing_info": result.get("printing_info", {})  # LLM 프린팅 요약 추가
-        }
-        data["comprehensive_summary"] = result.get("comprehensive_summary")
-        data["printing_info"] = result.get("printing_info", {})  # 별도 저장
-        data["timeline"] = result.get("timeline", [])
+            "printing_info": result.get("printing_info", {}),  # 별도 저장
+            "timeline": result.get("timeline", [])
+        })
 
         logger.info(f"[GCode] Analysis completed: {analysis_id}")
 
+        # 임시 파일 삭제
+        _cleanup_temp_files(analysis_id, data.get("temp_file"))
+
     except Exception as e:
-        data["status"] = "error"
-        data["error"] = str(e)
-        data["progress_message"] = f"오류: {str(e)}"
-        logger.error(f"[GCode] Analysis failed: {analysis_id} - {e}")
         import traceback
-        data["error_trace"] = traceback.format_exc()
+        update_analysis(analysis_id, {
+            "status": "error",
+            "error": str(e),
+            "progress_message": f"오류: {str(e)}",
+            "error_trace": traceback.format_exc()
+        })
+        logger.error(f"[GCode] Analysis failed: {analysis_id} - {e}")
 
 async def apply_gcode_patches_task(analysis_id: str, selected_patches: Optional[List[int]] = None):
     """백그라운드에서 패치 적용"""
     from gcode_analyzer.patcher import apply_patches, PatchPlan, PatchSuggestion
-    
-    data = gcode_analysis_store[analysis_id]
-    
+
+    data = get_analysis(analysis_id)
+    if data is None:
+        logger.error(f"[GCode] Analysis not found for patch: {analysis_id}")
+        return
+
     try:
         patch_plan_dict = data["result"].get("patch_plan")
         if not patch_plan_dict:
-            data["patch_status"] = "no_patches"
+            update_analysis(analysis_id, {"patch_status": "no_patches"})
             return
-        
+
         # 원본 파일 읽기
         with open(data["temp_file"], "r", encoding="utf-8") as f:
             original_lines = f.readlines()
-        
+
         # 선택된 패치만 또는 전체
         patches_data = patch_plan_dict.get("patches", [])
         if selected_patches is not None:
             patches_data = [p for i, p in enumerate(patches_data) if i in selected_patches]
-        
+
         # PatchPlan 복원
         patches = [
             PatchSuggestion(
@@ -780,35 +818,43 @@ async def apply_gcode_patches_task(analysis_id: str, selected_patches: Optional[
             )
             for i, p in enumerate(patches_data)
         ]
-        
+
         patch_plan = PatchPlan(
             file_path=data["temp_file"],
             total_patches=len(patches),
             patches=patches,
             estimated_quality_improvement=patch_plan_dict.get("estimated_improvement", 0)
         )
-        
+
         # 패치 적용
         new_lines, applied_log = apply_patches(original_lines, patch_plan)
-        
+
         # 결과 저장
-        data["patched_gcode"] = "".join(new_lines)
-        data["patch_status"] = "applied"
-        data["applied_patches"] = applied_log
-        
+        update_analysis(analysis_id, {
+            "patched_gcode": "".join(new_lines),
+            "patch_status": "applied",
+            "applied_patches": applied_log
+        })
+
         logger.info(f"[GCode] Patches applied: {analysis_id} ({len(applied_log)} patches)")
-        
+
     except Exception as e:
-        data["patch_status"] = "error"
-        data["patch_error"] = str(e)
+        update_analysis(analysis_id, {
+            "patch_status": "error",
+            "patch_error": str(e)
+        })
         logger.error(f"[GCode] Patch failed: {analysis_id} - {e}")
 
 async def run_gcode_summary_task(analysis_id: str):
     """백그라운드에서 G-code 요약만 실행 (LLM 없음)"""
     from gcode_analyzer.analyzer import run_analysis
 
-    data = gcode_analysis_store[analysis_id]
-    data["status"] = "running"
+    data = get_analysis(analysis_id)
+    if data is None:
+        logger.error(f"[GCode] Analysis not found: {analysis_id}")
+        return
+
+    update_analysis(analysis_id, {"status": "running"})
 
     # Progress 콜백 생성
     progress_callback = create_progress_callback(analysis_id)
@@ -828,37 +874,47 @@ async def run_gcode_summary_task(analysis_id: str):
         )
 
         # 결과 저장
-        data["status"] = "summary_completed"
-        data["progress"] = 1.0
-        data["current_step"] = "summary_completed"
-        data["progress_message"] = "요약 분석 완료"
-        data["comprehensive_summary"] = result.get("comprehensive_summary")
-        data["printing_info"] = result.get("printing_info", {})  # LLM 프린팅 요약
-        data["result"] = {
+        update_analysis(analysis_id, {
+            "status": "summary_completed",
+            "progress": 1.0,
+            "current_step": "summary_completed",
+            "progress_message": "요약 분석 완료",
             "comprehensive_summary": result.get("comprehensive_summary"),
-            "printing_info": result.get("printing_info", {}),  # LLM 프린팅 요약 추가
-            "summary": result.get("summary"),
-            "timeline": result.get("timeline", []),
-            "token_usage": result.get("token_usage", {})
-        }
-        data["timeline"] = result.get("timeline", [])
+            "printing_info": result.get("printing_info", {}),  # LLM 프린팅 요약
+            "result": {
+                "comprehensive_summary": result.get("comprehensive_summary"),
+                "printing_info": result.get("printing_info", {}),  # LLM 프린팅 요약 추가
+                "summary": result.get("summary"),
+                "timeline": result.get("timeline", []),
+                "token_usage": result.get("token_usage", {})
+            },
+            "timeline": result.get("timeline", [])
+        })
 
         logger.info(f"[GCode] Summary analysis completed: {analysis_id}")
 
+        # 임시 파일 삭제
+        _cleanup_temp_files(analysis_id, data.get("temp_file"))
+
     except Exception as e:
-        data["status"] = "error"
-        data["error"] = str(e)
-        data["progress_message"] = f"오류: {str(e)}"
-        logger.error(f"[GCode] Summary analysis failed: {analysis_id} - {e}")
         import traceback
-        data["error_trace"] = traceback.format_exc()
+        update_analysis(analysis_id, {
+            "status": "error",
+            "error": str(e),
+            "progress_message": f"오류: {str(e)}",
+            "error_trace": traceback.format_exc()
+        })
+        logger.error(f"[GCode] Summary analysis failed: {analysis_id} - {e}")
 
 
 async def run_gcode_error_analysis_task(analysis_id: str):
     """백그라운드에서 에러 분석 실행 (기존 요약 기반)"""
     from gcode_analyzer.analyzer import run_error_analysis_only
 
-    data = gcode_analysis_store[analysis_id]
+    data = get_analysis(analysis_id)
+    if data is None:
+        logger.error(f"[GCode] Analysis not found: {analysis_id}")
+        return
 
     # Progress 콜백 생성
     progress_callback = create_progress_callback(analysis_id)
@@ -876,31 +932,36 @@ async def run_gcode_error_analysis_task(analysis_id: str):
             language=data.get("language", "ko")  # 언어 설정 전달
         )
 
-        # 결과 저장
-        data["status"] = "completed"
-        data["progress"] = 1.0
-        data["current_step"] = "completed"
-        data["progress_message"] = "에러 분석 완료"
-        data["result"] = {
-            "comprehensive_summary": data.get("comprehensive_summary"),
-            "printing_info": data.get("printing_info", {}),  # 기존 요약의 프린팅 정보 유지
-            "final_summary": result.get("final_summary", {}),
-            "issues_found": result.get("issues_found", []),
-            "patch_plan": result.get("patch_plan"),
-            "timeline": result.get("timeline", []),
-            "token_usage": result.get("token_usage", {})
-        }
         # 타임라인 병합
         existing_timeline = data.get("timeline", [])
         new_timeline = result.get("timeline", [])
-        data["timeline"] = existing_timeline + new_timeline
+
+        # 결과 저장
+        update_analysis(analysis_id, {
+            "status": "completed",
+            "progress": 1.0,
+            "current_step": "completed",
+            "progress_message": "에러 분석 완료",
+            "result": {
+                "comprehensive_summary": data.get("comprehensive_summary"),
+                "printing_info": data.get("printing_info", {}),  # 기존 요약의 프린팅 정보 유지
+                "final_summary": result.get("final_summary", {}),
+                "issues_found": result.get("issues_found", []),
+                "patch_plan": result.get("patch_plan"),
+                "timeline": result.get("timeline", []),
+                "token_usage": result.get("token_usage", {})
+            },
+            "timeline": existing_timeline + new_timeline
+        })
 
         logger.info(f"[GCode] Error analysis completed: {analysis_id}")
 
     except Exception as e:
-        data["status"] = "error"
-        data["error"] = str(e)
-        data["progress_message"] = f"오류: {str(e)}"
-        logger.error(f"[GCode] Error analysis failed: {analysis_id} - {e}")
         import traceback
-        data["error_trace"] = traceback.format_exc()
+        update_analysis(analysis_id, {
+            "status": "error",
+            "error": str(e),
+            "progress_message": f"오류: {str(e)}",
+            "error_trace": traceback.format_exc()
+        })
+        logger.error(f"[GCode] Error analysis failed: {analysis_id} - {e}")

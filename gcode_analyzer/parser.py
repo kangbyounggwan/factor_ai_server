@@ -39,7 +39,11 @@ def parse_line(line: str, index: int) -> GCodeLine:
 def parse_gcode(file_path: str) -> List[GCodeLine]:
     """Parse a G-code file into a list of structured GCodeLine objects."""
     parsed_lines = []
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+    # newline='\n'을 지정하여 CR만 있는 줄바꿈을 무시하고 LF 기반으로만 처리
+    # 이렇게 하면 CRLF(\r\n)도 정상적으로 하나의 줄로 처리됨
+    with open(file_path, 'r', encoding='utf-8', errors='replace', newline='\n') as f:
         for i, line in enumerate(f):
+            # CR 문자가 줄 끝에 남아있으면 제거
+            line = line.rstrip('\r\n')
             parsed_lines.append(parse_line(line, i + 1))
     return parsed_lines
