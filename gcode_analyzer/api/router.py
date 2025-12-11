@@ -21,7 +21,7 @@ from gcode_analyzer.rate_limiter import (
 
 logger = logging.getLogger("uvicorn.error")
 
-router = APIRouter(prefix="/api/v1/gcode", tags=["G-code Analyzer"])
+router = APIRouter(prefix="/ai/api/v1/gcode", tags=["G-code Analyzer"])
 
 # ============================================================
 # Request/Response Models
