@@ -191,18 +191,18 @@ def rule_low_temp_extrusion(
     """
     results = []
     MIN_REASONABLE_TEMP = 100.0  # 이 이하는 확실히 이상
-    
+
     for event in temp_events:
         section, _ = get_section_for_event(event.line_index, boundaries)
-        
+
         # START에서는 무시 (예열 전)
         if section == GCodeSection.START:
             continue
-        
+
         # END에서는 무시 (냉각)
         if section == GCodeSection.END:
             continue
-        
+
         # BODY에서 낮은 온도 설정 (0은 아니지만 낮음)
         if event.cmd in ["M104", "M109"] and 0 < event.temp < MIN_REASONABLE_TEMP:
             results.append(RuleResult(
@@ -218,7 +218,91 @@ def rule_low_temp_extrusion(
                 confidence=0.9,
                 needs_llm_review=True
             ))
-    
+
+    return results
+
+
+def rule_unexpected_temp_change_in_body(
+    lines: List[GCodeLine],
+    temp_events: List[TempEvent],
+    boundaries: SectionBoundaries
+) -> List[RuleResult]:
+    """
+    규칙: BODY 구간에서 온도 변경 명령 감지
+
+    정상 패턴: START에서 온도 설정 → BODY에서 프린팅만 → END에서 온도 끄기
+    비정상: BODY 중간에 온도 변경 명령 (S0 제외한 다른 온도로 변경)
+    """
+    results = []
+
+    # START 구간의 마지막 노즐/베드 온도 기록
+    last_nozzle_temp = None
+    last_bed_temp = None
+
+    for event in temp_events:
+        section, _ = get_section_for_event(event.line_index, boundaries)
+
+        if section == GCodeSection.START:
+            # START에서 설정된 온도 기록
+            if event.cmd in ["M104", "M109"]:
+                last_nozzle_temp = event.temp
+            elif event.cmd in ["M140", "M190"]:
+                last_bed_temp = event.temp
+
+        elif section == GCodeSection.BODY:
+            # BODY에서 온도 변경 감지 (S0 = 끄기는 다른 규칙에서 처리)
+            if event.temp == 0:
+                continue  # early_temp_off 규칙에서 처리
+
+            # 노즐 온도 변경
+            if event.cmd in ["M104", "M109"]:
+                if last_nozzle_temp is not None and event.temp != last_nozzle_temp:
+                    diff = event.temp - last_nozzle_temp
+                    results.append(RuleResult(
+                        rule_name="unexpected_temp_change",
+                        triggered=True,
+                        anomaly=Anomaly(
+                            type=AnomalyType.RAPID_TEMP_CHANGE,
+                            line_index=event.line_index,
+                            severity="medium",
+                            message=f"BODY 구간에서 노즐 온도 변경: {last_nozzle_temp}°C → {event.temp}°C ({'+' if diff > 0 else ''}{diff}°C)",
+                            context={
+                                "prev_temp": last_nozzle_temp,
+                                "new_temp": event.temp,
+                                "diff": diff,
+                                "type": "nozzle"
+                            }
+                        ),
+                        confidence=0.85,
+                        needs_llm_review=True
+                    ))
+                # 온도 업데이트 (연속 변경 추적)
+                last_nozzle_temp = event.temp
+
+            # 베드 온도 변경
+            elif event.cmd in ["M140", "M190"]:
+                if last_bed_temp is not None and event.temp != last_bed_temp:
+                    diff = event.temp - last_bed_temp
+                    results.append(RuleResult(
+                        rule_name="unexpected_temp_change",
+                        triggered=True,
+                        anomaly=Anomaly(
+                            type=AnomalyType.RAPID_TEMP_CHANGE,
+                            line_index=event.line_index,
+                            severity="low",  # 베드 온도 변경은 덜 심각
+                            message=f"BODY 구간에서 베드 온도 변경: {last_bed_temp}°C → {event.temp}°C ({'+' if diff > 0 else ''}{diff}°C)",
+                            context={
+                                "prev_temp": last_bed_temp,
+                                "new_temp": event.temp,
+                                "diff": diff,
+                                "type": "bed"
+                            }
+                        ),
+                        confidence=0.8,
+                        needs_llm_review=True
+                    ))
+                last_bed_temp = event.temp
+
     return results
 
 # ============================================================
@@ -232,6 +316,7 @@ RULES: List[RuleFunction] = [
     rule_rapid_temp_change,
     rule_bed_temp_off_early,
     rule_low_temp_extrusion,
+    rule_unexpected_temp_change_in_body,  # BODY 구간 온도 변경 감지
 ]
 
 def run_all_rules(

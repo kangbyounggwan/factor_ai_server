@@ -391,7 +391,7 @@ async def process_modelling(request: Request, async_mode: bool = False):
         logger.warning("Meshy request failed: %s", str(e))
         raise HTTPException(status_code=504, detail="Meshy timeout or network error")
 
-@app.get("/v1/process/modelling/{task_id}", response_model=ApiResponse)
+@app.get("/ai/v1/process/modelling/{task_id}", response_model=ApiResponse)
 async def get_modelling(task_id: str):
     data = await get_modelling_status(task_id)
     resp = TaskStatusResponse(**data).model_dump()
@@ -440,7 +440,7 @@ class GenerateGCodeRequest(BaseModel):
 downloaded_files = set()  # 다운로드 완료된 파일 경로 저장
 
 
-@app.post("/v1/process/clean-model", response_model=ApiResponse)
+@app.post("/ai/v1/process/clean-model", response_model=ApiResponse)
 async def clean_model(payload: CleanModelRequest):
     """
     Clean and optimize GLB model using Blender, then convert to STL.
@@ -522,7 +522,7 @@ async def clean_model(payload: CleanModelRequest):
         raise HTTPException(status_code=500, detail="Blender processing failed")
 
 
-@app.post("/v1/process/generate-gcode", response_model=ApiResponse)
+@app.post("/ai/v1/process/generate-gcode", response_model=ApiResponse)
 async def generate_gcode(payload: GenerateGCodeRequest):
     """
     Convert STL file to G-code using CuraEngine.
@@ -632,7 +632,7 @@ async def generate_gcode(payload: GenerateGCodeRequest):
         raise HTTPException(status_code=500, detail="G-code generation failed")
 
 
-@app.post("/v1/process/upload-stl-and-slice", response_model=ApiResponse)
+@app.post("/ai/v1/process/upload-stl-and-slice", response_model=ApiResponse)
 async def upload_stl_and_slice(
     file: UploadFile = File(...),  # 3D 모델 파일 (STL, GLB, GLTF, OBJ)
     cura_settings_json: str = Form("{}"),

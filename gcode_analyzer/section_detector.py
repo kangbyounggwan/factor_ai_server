@@ -75,26 +75,51 @@ def detect_sections(lines: List[GCodeLine]) -> SectionBoundaries:
         start_end = min(100, total_lines)
     
     # END 시작 감지: 뒤에서부터 탐색
-    end_markers_cmd = ["M84", "M106"]  # 모터 비활성화, 팬 제어
-    end_markers_comment = [";END", "END GCODE", "; END", ";Time elapsed"]
-    
-    # 뒤에서 500줄 내에서 종료 패턴 찾기
+    end_markers_comment = [";END", "END GCODE", "; END", ";Time elapsed", "END_GCODE"]
+    end_found = False
+
+    # 1. 먼저 종료 코멘트 찾기 (가장 확실한 기준) - 앞에서부터 탐색
     search_start = max(0, total_lines - 500)
-    for i in range(total_lines - 1, search_start, -1):
+    for i in range(search_start, total_lines):
         line = lines[i]
-        
-        # M104 S0 또는 M140 S0이 END 시작
-        if line.cmd in ["M104", "M140"] and line.params.get("S") == 0:
-            body_end = i  # 이 라인 직전까지 BODY
-            break
-        
-        # 종료 코멘트 감지
         if line.comment:
             for marker in end_markers_comment:
                 if marker.upper() in line.comment.upper():
                     body_end = i
+                    end_found = True
                     break
-    
+            if end_found:
+                break
+
+    # 2. 종료 코멘트 없으면, M104 S0 / M140 S0 찾기 (뒤에서부터)
+    if not end_found:
+        for i in range(total_lines - 1, search_start, -1):
+            line = lines[i]
+            if line.cmd in ["M104", "M140"] and line.params.get("S") == 0:
+                body_end = i
+                end_found = True
+                break
+
+    # 3. 그래도 못 찾으면, G28 (홈으로) 또는 M84 (모터 끄기) 찾기
+    if not end_found:
+        for i in range(total_lines - 1, search_start, -1):
+            line = lines[i]
+            if line.cmd in ["G28", "M84"]:
+                # 이 명령이 있는 곳부터 END 시작점 앞으로 찾기
+                for j in range(i, search_start, -1):
+                    prev_line = lines[j]
+                    # 마지막 압출(E 파라미터) 라인 = BODY 끝
+                    if prev_line.cmd in ["G0", "G1"] and "E" in prev_line.params:
+                        body_end = j + 1
+                        end_found = True
+                        break
+                break
+
+    # 4. 최소한 끝에서 50줄은 END로 보장 (fallback)
+    min_end_size = min(50, max(total_lines // 20, 10))  # 최소 50줄 또는 전체의 5%
+    if body_end > total_lines - min_end_size:
+        body_end = total_lines - min_end_size
+
     # body_end가 start_end보다 작으면 안됨
     if body_end <= start_end:
         body_end = total_lines - min(50, total_lines // 10)

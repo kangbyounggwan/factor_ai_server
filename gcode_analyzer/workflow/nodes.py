@@ -15,7 +15,7 @@ from datetime import datetime
 from .state import AnalysisState
 from ..parser import parse_gcode
 from ..summary import summarize_gcode, build_layer_map
-from ..temp_tracker import extract_temp_events
+from ..temp_tracker import extract_temp_events, extract_temp_changes
 from ..section_detector import detect_sections, SectionBoundaries
 from ..event_analyzer import analyze_all_temp_events, get_summary, EventAnalysisResult
 from ..data_preparer import extract_temp_event_snippets, detect_filament_from_gcode
@@ -148,7 +148,10 @@ def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
     
     # 온도 이벤트 추출
     temp_events = extract_temp_events(parsed_lines)
-    
+
+    # 온도 변화 추출 (노즐/베드 분리)
+    temp_changes = extract_temp_changes(temp_events)
+
     # 룰 엔진 실행
     rule_results = run_all_rules(parsed_lines, temp_events, boundaries)
     rule_summary = get_rule_summary(rule_results)
@@ -199,9 +202,10 @@ def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
     
     return {
         "temp_events": [e.dict() for e in temp_events],
-        "rule_results": [{"rule_name": r.rule_name, "triggered": r.triggered, 
-                         "confidence": r.confidence, 
-                         "anomaly": r.anomaly.dict() if r.anomaly else None} 
+        "temp_changes": temp_changes,  # 온도 변화 전체 (노즐/베드)
+        "rule_results": [{"rule_name": r.rule_name, "triggered": r.triggered,
+                         "confidence": r.confidence,
+                         "anomaly": r.anomaly.dict() if r.anomaly else None}
                         for r in rule_results],
         "event_analysis_results": [r.dict() for r in analysis_results],
         "events_needing_llm": [r.dict() if hasattr(r, 'dict') else r for r in needs_llm],
@@ -406,6 +410,7 @@ def final_output_node(state: AnalysisState) -> Dict[str, Any]:
     issues_found = state.get("issues_found", [])
     comprehensive_summary = state.get("comprehensive_summary", {})
     layer_map = state.get("layer_map", {})
+    temp_changes = state.get("temp_changes", {})
 
     timeline = state.get("timeline", [])
     
@@ -462,7 +467,10 @@ def final_output_node(state: AnalysisState) -> Dict[str, Any]:
              "total_lines": comprehensive_summary.get("total_lines"),
              "print_time": comprehensive_summary.get("print_time", {}).get("formatted_time"),
         },
-        
+
+        # 온도 변화 전체 (노즐/베드)
+        "temp_changes": temp_changes,
+
         "patch_available": bool(patch_plan),
         "patch_count": patch_plan.total_patches if patch_plan else 0,
         "patch_preview": format_patch_preview(patch_plan) if patch_plan else None

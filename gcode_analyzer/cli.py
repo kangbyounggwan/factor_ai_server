@@ -12,11 +12,7 @@ def main():
     sum_parser = subparsers.add_parser("summarize", help="Summarize G-code file")
     sum_parser.add_argument("file", help="Path to G-code file")
 
-    # Analyze command (기존 규칙 기반 - deprecated)
-    analyze_parser = subparsers.add_parser("analyze", help="[Legacy] Rule-based analysis")
-    analyze_parser.add_argument("file", help="Path to G-code file")
-
-    # Workflow command (새로운 LLM 기반)
+    # Workflow command (LLM 기반)
     workflow_parser = subparsers.add_parser("workflow", help="Run LLM-based analysis workflow")
     workflow_parser.add_argument("file", help="Path to G-code file")
     workflow_parser.add_argument("--filament", "-f", help="Filament type (PLA, ABS, PETG, TPU)", default=None)
@@ -34,26 +30,6 @@ def main():
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
             
-    elif args.command == "analyze":
-        # Legacy: 규칙 기반 분석 (하위 호환)
-        try:
-            from .temp_tracker import extract_temp_events
-            from .anomaly_detector import detect_anomalies
-            
-            parsed = parse_gcode(args.file)
-            summary = summarize_gcode(parsed)
-            temp_events = extract_temp_events(parsed)
-            anomalies = detect_anomalies(parsed, temp_events)
-            
-            result = {
-                "summary": summary.dict(),
-                "anomalies": [a.dict() for a in anomalies]
-            }
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-
     elif args.command == "workflow":
         # 새로운 LLM 기반 워크플로우
         try:

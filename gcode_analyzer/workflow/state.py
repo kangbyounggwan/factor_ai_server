@@ -33,6 +33,7 @@ class AnalysisState(TypedDict):
 
     # 온도 이벤트 및 분석
     temp_events: List[Any]
+    temp_changes: Dict[str, Any]                  # 온도 변화 전체 (노즐/베드)
     rule_results: List[Dict[str, Any]]            # 룰 엔진 결과
     event_analysis_results: List[Dict[str, Any]]  # Python 분석 결과
     events_needing_llm: List[Dict[str, Any]]      # LLM 분석 필요한 것만
