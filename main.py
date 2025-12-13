@@ -92,6 +92,28 @@ async def health():
     return ApiResponse(status="ok", data={"service": "alive"})
 
 
+@app.get("/v1/tasks/active", response_model=ApiResponse)
+async def get_active_tasks():
+    """현재 실행 중인 백그라운드 작업 목록 조회"""
+    from background_tasks import _background_tasks
+
+    active_tasks = []
+    for task_id, task in _background_tasks.items():
+        active_tasks.append({
+            "task_id": task_id,
+            "done": task.done(),
+            "cancelled": task.cancelled()
+        })
+
+    return ApiResponse(
+        status="ok",
+        data={
+            "count": len(_background_tasks),
+            "tasks": active_tasks
+        }
+    )
+
+
 @app.options("/v1/process/modelling")
 async def options_process_modelling():
     """Handle CORS preflight for process_modelling endpoint"""
@@ -391,7 +413,7 @@ async def process_modelling(request: Request, async_mode: bool = False):
         logger.warning("Meshy request failed: %s", str(e))
         raise HTTPException(status_code=504, detail="Meshy timeout or network error")
 
-@app.get("/ai/v1/process/modelling/{task_id}", response_model=ApiResponse)
+@app.get("/v1/process/modelling/{task_id}", response_model=ApiResponse)
 async def get_modelling(task_id: str):
     data = await get_modelling_status(task_id)
     resp = TaskStatusResponse(**data).model_dump()
@@ -440,7 +462,7 @@ class GenerateGCodeRequest(BaseModel):
 downloaded_files = set()  # 다운로드 완료된 파일 경로 저장
 
 
-@app.post("/ai/v1/process/clean-model", response_model=ApiResponse)
+@app.post("/v1/process/clean-model", response_model=ApiResponse)
 async def clean_model(payload: CleanModelRequest):
     """
     Clean and optimize GLB model using Blender, then convert to STL.
@@ -522,7 +544,7 @@ async def clean_model(payload: CleanModelRequest):
         raise HTTPException(status_code=500, detail="Blender processing failed")
 
 
-@app.post("/ai/v1/process/generate-gcode", response_model=ApiResponse)
+@app.post("/v1/process/generate-gcode", response_model=ApiResponse)
 async def generate_gcode(payload: GenerateGCodeRequest):
     """
     Convert STL file to G-code using CuraEngine.
@@ -632,7 +654,7 @@ async def generate_gcode(payload: GenerateGCodeRequest):
         raise HTTPException(status_code=500, detail="G-code generation failed")
 
 
-@app.post("/ai/v1/process/upload-stl-and-slice", response_model=ApiResponse)
+@app.post("/v1/process/upload-stl-and-slice", response_model=ApiResponse)
 async def upload_stl_and_slice(
     file: UploadFile = File(...),  # 3D 모델 파일 (STL, GLB, GLTF, OBJ)
     cura_settings_json: str = Form("{}"),

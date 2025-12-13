@@ -202,21 +202,14 @@ def _create_dashboard_response(analysis_id: str, data: Dict[str, Any]) -> Dashbo
 from gcode_analyzer.api.file_store import gcode_analysis_store, get_analysis, set_analysis, update_analysis, exists, delete_analysis
 
 
-def _cleanup_temp_files(analysis_id: str, temp_file: Optional[str] = None):
-    """분석 완료 후 임시 파일 및 상태 파일 정리"""
-    # 임시 G-code 파일 삭제
+def _cleanup_temp_gcode_file(temp_file: Optional[str] = None):
+    """임시 G-code 파일만 삭제 (상태 파일은 유지)"""
     if temp_file and os.path.exists(temp_file):
         try:
             os.remove(temp_file)
-            logger.info(f"[GCode] Deleted temp file: {temp_file}")
+            logger.info(f"[GCode] Deleted temp gcode file: {temp_file}")
         except Exception as e:
             logger.warning(f"[GCode] Failed to delete temp file {temp_file}: {e}")
-
-    # 상태 JSON 파일 삭제
-    if delete_analysis(analysis_id):
-        logger.info(f"[GCode] Deleted analysis state: {analysis_id}")
-    else:
-        logger.warning(f"[GCode] Failed to delete analysis state: {analysis_id}")
 
 # ============================================================
 # API Endpoints
@@ -768,8 +761,8 @@ async def run_gcode_analysis_task(analysis_id: str):
 
         logger.info(f"[GCode] Analysis completed: {analysis_id}")
 
-        # 임시 파일 삭제
-        _cleanup_temp_files(analysis_id, data.get("temp_file"))
+        # 임시 G-code 파일만 삭제 (상태 파일은 클라이언트가 조회할 수 있도록 유지)
+        _cleanup_temp_gcode_file(data.get("temp_file"))
 
     except Exception as e:
         import traceback
@@ -893,8 +886,8 @@ async def run_gcode_summary_task(analysis_id: str):
 
         logger.info(f"[GCode] Summary analysis completed: {analysis_id}")
 
-        # 임시 파일 삭제
-        _cleanup_temp_files(analysis_id, data.get("temp_file"))
+        # 임시 G-code 파일만 삭제 (상태 파일은 클라이언트가 조회할 수 있도록 유지)
+        _cleanup_temp_gcode_file(data.get("temp_file"))
 
     except Exception as e:
         import traceback

@@ -59,12 +59,19 @@ DEFAULT_CURA_SETTINGS = {
     "material_print_temperature_layer_0": "205",
     "material_bed_temperature_layer_0": "60",
 
-    # Support
+    # Support (기본값: 비활성화, 트리 서포트 파라미터는 CuraEngine 기본값 사용)
     "support_enable": "false",
-    "support_type": "buildplate",
-    "support_angle": "50",
-    "support_infill_rate": "20",
-    "support_z_distance": "0.2",
+    # support_structure, support_tree_* 등은 명시하지 않으면 CuraEngine 기본값 사용
+    # 트리 서포트 활성화 시 클라이언트에서 다음을 전송:
+    #   "support_enable": "true",
+    #   "support_structure": "tree"
+    # 나머지 트리 서포트 파라미터 (기본값 사용 권장):
+    #   support_tree_angle: 45 (기본값)
+    #   support_tree_branch_diameter: 2.0 (기본값)
+    #   support_tree_branch_diameter_angle: 5 (기본값)
+    #   support_tree_tip_diameter: 0.8 (기본값)
+    #   support_tree_branch_distance: 1.0 (기본값)
+    #   support_tree_collision_resolution: 0.2 (기본값)
 
     # Adhesion
     "adhesion_type": "skirt",
