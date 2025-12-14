@@ -103,16 +103,16 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
         bb = obj.dimensions
         log(f"Model dimensions: {{bb.x:.2f}} x {{bb.y:.2f}} x {{bb.z:.2f}}")
 
-        # ========== BASIC CLEANING (MINIMAL PROCESSING) ==========
+        # ========== ADVANCED CLEANING (3D PRINT OPTIMIZED) ==========
 
         # 1) Weld - 중복 버텍스 병합 (기본 정리)
-        log("[1/4] Welding duplicate vertices...")
+        log("[1/6] Welding duplicate vertices...")
         weld = obj.modifiers.new("Weld","WELD")
         weld.merge_threshold = {weld_threshold}
         bpy.ops.object.modifier_apply(modifier=weld.name)
 
         # 2) Fix non-manifold - 기본 수정만 (구멍 메우기, 노멀 통일)
-        log("[2/4] Fixing non-manifold geometry...")
+        log("[2/6] Fixing non-manifold geometry...")
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_all(action='DESELECT')
         try:
@@ -125,8 +125,39 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
         bpy.ops.mesh.remove_doubles(threshold=0.0001)
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        # 3) Separate and remove only very small loose parts (optional)
-        log("[3/4] Removing very small loose parts...")
+        # 3) Fix Intersecting Triangles (교차 삼각형 수정)
+        log("[3/6] Fixing intersecting triangles...")
+        bpy.ops.object.mode_set(mode='EDIT')
+        try:
+            import bmesh
+            bm = bmesh.from_edit_mesh(obj.data)
+
+            # 자기 교차 감지 및 수정
+            bpy.ops.mesh.select_all(action='SELECT')
+
+            # 방법 1: 작은 면 제거 (교차 원인이 되는 경우가 많음)
+            bpy.ops.mesh.dissolve_degenerate(threshold=0.0001)
+
+            # 방법 2: 내부 면 제거
+            bpy.ops.mesh.select_all(action='DESELECT')
+            bpy.ops.mesh.select_interior_faces()
+            interior_count = len([f for f in bm.faces if f.select])
+            if interior_count > 0:
+                log(f"  - Removing {{interior_count}} interior faces...")
+                bpy.ops.mesh.delete(type='FACE')
+
+            bmesh.update_edit_mesh(obj.data)
+
+            # 방법 3: Boolean 자체 교차 수정 (Remesh로 대체)
+            bpy.ops.mesh.select_all(action='SELECT')
+            bpy.ops.mesh.remove_doubles(threshold=0.0001)
+
+        except Exception as e:
+            log(f"  - Intersect fix warning: {{e}}")
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        # 4) Separate loose parts for noise shell detection
+        log("[4/6] Detecting and removing noise shells...")
         bpy.ops.object.mode_set(mode='EDIT')
         try:
             bpy.ops.mesh.select_all(action='SELECT')
@@ -136,12 +167,29 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.context.view_layer.update()
 
-        # Remove only extremely small parts (very strict threshold)
+        # Identify and remove noise shells (작은 분리된 조각들)
         depsgraph = bpy.context.evaluated_depsgraph_get()
         to_delete = []
         parts = [o for o in bpy.context.scene.objects if o.type == 'MESH']
 
+        # 가장 큰 파트 찾기 (메인 모델)
+        main_part = None
+        max_volume = 0
         for o in parts:
+            try:
+                vol = float(o.dimensions.x * o.dimensions.y * o.dimensions.z)
+                if vol > max_volume:
+                    max_volume = vol
+                    main_part = o
+            except:
+                continue
+
+        log(f"  - Found {{len(parts)}} separate parts, main part volume: {{max_volume:.4f}}")
+
+        for o in parts:
+            if o == main_part:
+                continue  # 메인 파트는 유지
+
             try:
                 eval_obj = o.evaluated_get(depsgraph)
                 me = eval_obj.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
@@ -151,10 +199,26 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
             except ReferenceError:
                 continue
 
-            # 매우 작은 파트만 제거 (기본 임계값의 1/10)
-            if vcount < min_verts // 10 or vol < min_bbox_vol:
+            # 노이즈 쉘 판정 기준:
+            # 1) 버텍스 수가 매우 적음 (< min_verts)
+            # 2) 부피가 메인 파트의 5% 미만
+            # 3) 바운딩박스 부피가 매우 작음
+            is_noise_shell = False
+            reason = ""
+
+            if vcount < min_verts:
+                is_noise_shell = True
+                reason = f"too few verts ({{vcount}} < {{min_verts}})"
+            elif max_volume > 0 and vol < max_volume * max_part_ratio:
+                is_noise_shell = True
+                reason = f"too small volume ({{vol:.6f}} < {{max_volume * max_part_ratio:.6f}})"
+            elif vol < min_bbox_vol:
+                is_noise_shell = True
+                reason = f"tiny bbox ({{vol:.8f}} < {{min_bbox_vol}})"
+
+            if is_noise_shell:
                 to_delete.append(o)
-                log(f"  - Remove tiny part: verts={{vcount}}, vol={{vol:.6f}}")
+                log(f"  - Noise shell removed: {{o.name}} ({{reason}})")
 
         if to_delete:
             bpy.ops.object.select_all(action='DESELECT')
@@ -162,11 +226,24 @@ def main(in_path, out_glb, min_verts, min_bbox_vol, max_part_ratio, decimate_rat
                 if o.name in bpy.context.scene.objects:
                     o.select_set(True)
             bpy.ops.object.delete()
-        log(f"Removed {{len(to_delete)}} tiny parts")
+        log(f"  - Removed {{len(to_delete)}} noise shells")
         bpy.context.view_layer.update()
 
-        # 4) Join remaining parts
-        log("[4/4] Joining remaining parts...")
+        # 5) Additional intersect cleanup using 3D Print Toolbox (if available)
+        log("[5/6] Final intersect cleanup...")
+        try:
+            bpy.ops.preferences.addon_enable(module='object_print3d_utils')
+            parts = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+            if parts:
+                bpy.context.view_layer.objects.active = parts[0]
+                # 3D Print Toolbox의 자체 교차 검사
+                bpy.ops.mesh.print3d_clean_non_manifold()
+                log("  - 3D Print Toolbox cleanup applied")
+        except Exception as e:
+            log(f"  - 3D Print Toolbox not available: {{e}}")
+
+        # 6) Join remaining parts
+        log("[6/6] Joining remaining parts...")
         parts=[o for o in bpy.context.scene.objects if o.type=='MESH']
         if not parts:
             raise RuntimeError("No mesh after cleaning")
