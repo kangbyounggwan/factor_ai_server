@@ -93,6 +93,16 @@ DEFAULT_CURA_SETTINGS = {
     "cool_min_layer_time": "10",
     "cool_min_speed": "10",
 
+    # Temperature consistency (prevent temperature drop during print)
+    "material_final_print_temperature": "200",  # Keep nozzle temp until end
+    "material_initial_print_temperature": "200",  # Initial nozzle temp
+    "material_print_temperature_layer_0": "205",  # First layer temp
+    "cool_min_temperature": "200",  # CRITICAL: Prevent temp drop on small layers (default is 0!)
+    "small_feature_max_length": "0",  # Disable small feature detection
+    "small_feature_speed_factor": "100",  # No speed reduction for small features
+    "small_feature_speed_factor_0_first_layer": "100",  # No reduction on first layer
+    "cool_lift_head": "false",  # Don't lift head on cooling
+
     # Quality
     "optimize_wall_printing_order": "true",
     "fill_outline_gaps": "true",

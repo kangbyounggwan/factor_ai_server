@@ -36,7 +36,9 @@
       "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\" tests/test_rate_limiter.py)",
       "Bash(\"C:\\Users\\USER\\anaconda3\\python.exe\" -c \"import sys; sys.path.insert(0, ''c:/Users/USER/factor_AI_python''); from gcode_analyzer.rate_limiter import GeminiRateLimiter, RateLimitConfig, RateLimitError; import asyncio; config = RateLimitConfig(user_rpm=5, user_daily_limit=10); limiter = GeminiRateLimiter(config); print(''Rate Limiter created successfully''); print(f''Stats: {limiter.get_stats()}'')\")",
       "Bash(git fetch:*)",
-      "Bash(git stash push:*)"
+      "Bash(git stash push:*)",
+      "Bash(TEST='{\"\"\"\"context_window\"\"\"\":{\"\"\"\"context_window_used\"\"\"\":220000,\"\"\"\"context_window_size\"\"\"\":200000}}' echo \"$TEST\")",
+      "Bash(git merge:*)"
     ],
     "deny": [],
     "ask": []
