@@ -888,8 +888,8 @@ SPEED_THRESHOLDS = {
     "quality_print_min_mms": 30,     # 30 mm/s (고품질)
     "quality_print_max_mms": 150,    # 150 mm/s (표준 품질)
 
-    # 급격한 속도 변화 임계값
-    "rapid_change_threshold_mms": 100,  # 100 mm/s 이상 급변
+    # 급격한 속도 변화 임계값 (너무 민감하면 오탐 발생)
+    "rapid_change_threshold_mms": 200,  # 200 mm/s 이상 급변 (F12000 차이)
 }
 
 
@@ -1190,7 +1190,7 @@ RULES: List[RuleFunction] = [
     rule_excessive_print_speed,
     rule_too_slow_print_speed,
     rule_zero_speed_extrusion,
-    rule_rapid_speed_change,
+    # rule_rapid_speed_change,  # 비활성화: 슬라이서가 타입별로 속도를 다르게 설정하므로 오탐 많음
 ]
 
 def run_all_rules(
