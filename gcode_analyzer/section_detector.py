@@ -161,38 +161,24 @@ def detect_sections(lines: List[GCodeLine]) -> SectionBoundaries:
     # ============================================================
 
     # END 마커 패턴들 (다양한 슬라이서 지원)
-    end_markers_comment = [
-        # 명시적 END 마커
-        ";END", "; END", ";END_GCODE", "; END_GCODE",
-        ";END GCODE", "; END GCODE", "END_GCODE_BEGIN",
-        # 시간 정보 (END 직전에 나옴)
-        ";TIME ELAPSED", "; TIME ELAPSED", ";Time elapsed",
+    # 주의: "hotend", "frontend" 등과 구분하기 위해 정확한 매칭 필요
+    end_markers_exact = [
+        # 명시적 END 마커 (정확히 매칭해야 함)
+        "END_GCODE", "END GCODE", "END_GCODE_BEGIN", "End of Gcode",
         # Bambu/Orca
-        "; EXECUTABLE_BLOCK_END", "; filament end gcode",
+        "EXECUTABLE_BLOCK_END", "filament end gcode",
         # PrusaSlicer
-        "; Filament-specific end G-code",
+        "Filament-specific end G-code",
     ]
+    # 단독 "END"는 단어 경계로 체크 (hotend와 구분)
+    end_pattern = re.compile(r'\bEND\b(?!_GCODE)', re.IGNORECASE)
 
     end_found = False
     search_start = max(0, total_lines - 500)
 
-    # 1. 명시적 END 코멘트 찾기 (가장 확실한 기준)
-    for i in range(search_start, total_lines):
-        line = lines[i]
-        if line.comment:
-            comment_upper = line.comment.upper()
-            for marker in end_markers_comment:
-                marker_upper = marker.upper().lstrip(";").strip()
-                if marker_upper in comment_upper:
-                    body_end = i
-                    end_found = True
-                    break
-            if end_found:
-                break
-
-    # 2. 마지막 레이어/익스트루전 이후 온도 끄기 명령 찾기
-    if not end_found and last_extrusion_line > 0:
-        # 마지막 익스트루전 이후에서 M104 S0 / M140 S0 찾기
+    # 1. 마지막 익스트루전 이후 온도 끄기 명령 찾기 (가장 정확한 기준)
+    # 출력 완료 후 온도를 끄는 시점이 END의 시작
+    if last_extrusion_line > 0:
         for i in range(last_extrusion_line + 1, total_lines):
             line = lines[i]
             # 온도 0으로 설정 = END 시작
@@ -205,6 +191,31 @@ def detect_sections(lines: List[GCodeLine]) -> SectionBoundaries:
                 body_end = i
                 end_found = True
                 break
+
+    # 2. 명시적 END 코멘트 찾기 (fallback)
+    if not end_found:
+        for i in range(search_start, total_lines):
+            line = lines[i]
+            if line.comment:
+                comment_text = line.comment
+                comment_upper = comment_text.upper()
+
+                # 정확한 마커 매칭 (대소문자 무시)
+                marker_matched = False
+                for marker in end_markers_exact:
+                    if marker.upper() in comment_upper:
+                        body_end = i
+                        end_found = True
+                        marker_matched = True
+                        break
+
+                # 단독 "END" 단어 매칭 (hotend, frontend 등 제외)
+                if not marker_matched and end_pattern.search(comment_text):
+                    body_end = i
+                    end_found = True
+
+                if end_found:
+                    break
 
     # 3. 뒤에서부터 M104 S0 / M140 S0 찾기
     if not end_found:
