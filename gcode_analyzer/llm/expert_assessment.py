@@ -29,14 +29,18 @@ async def generate_expert_assessment(
         # 꼭 필요한 정보만 복사
         # Line number extraction (check various keys)
         line_num = issue.get("line") or issue.get("line_index") or issue.get("event_line_index")
-        
+
+        # autofix_allowed 확인 (기본값 True)
+        autofix_allowed = issue.get("autofix_allowed", True)
+
         opt_issue = {
             "line": line_num,
             "event_type": issue.get("event_type") or issue.get("issue_type"),
             "title": issue.get("title"),
             "description": issue.get("description"),
             "severity": issue.get("severity"),
-            "recommendation": issue.get("recommendation") or issue.get("suggestion")
+            "recommendation": issue.get("recommendation") or issue.get("suggestion"),
+            "autofix_allowed": autofix_allowed  # 수동 검토 필요 여부
         }
         optimized_issues.append(opt_issue)
 

@@ -85,6 +85,12 @@ EXPERT_ASSESSMENT_PROMPT = ChatPromptTemplate.from_template("""
 - **온도 0°C 이슈는 무조건 critical로 분류**
 - 동일 유형 이슈 반복 시 추가 감점 최소화
 
+## ⚠️ 수동 검토 이슈 처리 (중요!)
+**`autofix_allowed: false`인 이슈는 LLM이 확신하지 못하는 항목입니다.**
+- severity를 **critical → warning**, **high → medium**으로 한 단계 낮춰서 평가
+- 점수 감점도 50%만 적용 (오탐 가능성 고려)
+- 사용자에게 "확인 필요" 또는 "수동 검토 권장"으로 표시
+
 1. **quality_score**: 위 기준에 따른 점수.
 2. **quality_grade**: 위 기준에 따른 등급.
 3. **print_characteristics**:
