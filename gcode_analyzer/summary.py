@@ -1,11 +1,27 @@
 from typing import List, Optional, Dict
 from pydantic import BaseModel
 from .models import GCodeLine, GCodeSummary
+import re
+
+
+# 슬라이서별 레이어 감지 패턴 (segment_extractor.py와 동일)
+_CURA_LAYER = re.compile(r';LAYER:(\d+)', re.IGNORECASE)
+_BAMBU_LAYER = re.compile(r'; layer num/total_layer_count:\s*(\d+)/(\d+)', re.IGNORECASE)
+_BAMBU_M73_LAYER = re.compile(r'^M73\s+L(\d+)', re.IGNORECASE)
+_ORCA_LAYER_CHANGE = re.compile(r';LAYER_CHANGE', re.IGNORECASE)
+_S3D_LAYER = re.compile(r'; layer\s+(\d+)', re.IGNORECASE)
+_GENERIC_LAYER = re.compile(r'layer\s*[:#]?\s*(\d+)', re.IGNORECASE)
 
 
 def build_layer_map(lines: List[GCodeLine]) -> Dict[int, int]:
     """
     라인 인덱스 → 레이어 번호 매핑 테이블 생성
+
+    다양한 슬라이서 지원:
+    - Cura: ;LAYER:N
+    - BambuStudio: ; layer num/total_layer_count: N/M, M73 LN
+    - OrcaSlicer/PrusaSlicer: ;LAYER_CHANGE + Z 변경
+    - Simplify3D: ; layer N
 
     Args:
         lines: 파싱된 G-code 라인들
@@ -15,27 +31,60 @@ def build_layer_map(lines: List[GCodeLine]) -> Dict[int, int]:
     """
     layer_map = {}
     current_layer = 0
+    pending_layer_change = False
+    last_z = 0.0
 
     for idx, line in enumerate(lines):
-        if line.comment:
-            comment = line.comment.strip()
-            # Cura, PrusaSlicer 등 다양한 슬라이서 포맷 지원
-            if comment.startswith("LAYER:"):
-                try:
-                    current_layer = int(comment.split("LAYER:")[1].strip())
-                except ValueError:
-                    pass
-            elif comment.startswith(";LAYER:"):
-                try:
-                    current_layer = int(comment.split(";LAYER:")[1].strip())
-                except ValueError:
-                    pass
-            elif "layer" in comment.lower():
-                # "Layer 10" 같은 포맷
-                import re
-                match = re.search(r'layer\s*[:#]?\s*(\d+)', comment, re.IGNORECASE)
-                if match:
-                    current_layer = int(match.group(1))
+        raw = line.raw or ""
+
+        # Cura 스타일: ;LAYER:N
+        match = _CURA_LAYER.search(raw)
+        if match:
+            current_layer = int(match.group(1))
+            layer_map[idx] = current_layer
+            continue
+
+        # BambuStudio 스타일: ; layer num/total_layer_count: N/M
+        match = _BAMBU_LAYER.search(raw)
+        if match:
+            layer_num = int(match.group(1))
+            # BambuStudio는 1부터 시작하므로 0-indexed로 변환
+            current_layer = layer_num - 1
+            layer_map[idx] = current_layer
+            continue
+
+        # BambuStudio M73 L 명령
+        match = _BAMBU_M73_LAYER.match(raw)
+        if match:
+            layer_num = int(match.group(1))
+            current_layer = layer_num - 1  # 0-indexed로 변환
+            layer_map[idx] = current_layer
+            continue
+
+        # OrcaSlicer/PrusaSlicer 스타일: ;LAYER_CHANGE
+        if _ORCA_LAYER_CHANGE.search(raw):
+            pending_layer_change = True
+            layer_map[idx] = current_layer
+            continue
+
+        # Simplify3D 스타일: ; layer N
+        match = _S3D_LAYER.search(raw)
+        if match:
+            current_layer = int(match.group(1))
+            layer_map[idx] = current_layer
+            continue
+
+        # LAYER_CHANGE 후 Z 변경 감지 (OrcaSlicer)
+        if pending_layer_change and line.cmd in ('G0', 'G1') and 'Z' in line.params:
+            new_z = line.params['Z']
+            if abs(new_z - last_z) > 0.001 and new_z > 0:
+                current_layer += 1
+                pending_layer_change = False
+                last_z = new_z
+
+        # Z 값 추적 (레이어 변경 감지용)
+        if line.cmd in ('G0', 'G1') and 'Z' in line.params:
+            last_z = line.params['Z']
 
         layer_map[idx] = current_layer
 
@@ -120,8 +169,9 @@ def summarize_gcode(lines: List[GCodeLine]) -> GCodeSummary:
     bed_min = min(bed_temps) if bed_temps else 0.0
     bed_max = max(bed_temps) if bed_temps else 0.0
     
-    max_f = max(speeds) if speeds else 0.0
-    avg_f = sum(speeds) / len(speeds) if speeds else 0.0
+    # F 값은 mm/min 단위이므로 mm/s로 변환 (÷60)
+    max_f = max(speeds) / 60.0 if speeds else 0.0
+    avg_f = (sum(speeds) / len(speeds)) / 60.0 if speeds else 0.0
     
     # Estimate layer height (mode or min diff) - simplified
     # Real layer height is usually constant.

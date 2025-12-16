@@ -57,6 +57,21 @@ class GCodeSummaryRequest(BaseModel):
     language: Optional[str] = "ko"  # "ko" | "en" | "ja" | "zh" (기본값: 한국어)
 
 
+class GCodeSegmentAnalysisRequest(BaseModel):
+    """세그먼트 + LLM 분석 요청 (스트리밍)
+
+    1단계: 세그먼트 데이터(Float32Array+Base64) 즉시 반환
+    2단계: LLM 분석 완료 후 결과 반환
+    """
+    gcode_content: str
+    printer_info: Optional[PrinterInfo] = None
+    filament_type: Optional[str] = None
+    user_id: Optional[str] = None
+    analysis_id: Optional[str] = None
+    language: Optional[str] = "ko"
+    binary_format: bool = True  # True: Float32Array+Base64, False: JSON 배열
+
+
 class ErrorAnalysisRequest(BaseModel):
     """에러 분석 요청 (기존 요약 기반)"""
     analysis_id: str  # 기존 요약 분석 ID
@@ -454,8 +469,10 @@ async def get_gcode_summary(analysis_id: str):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
 
     data = get_analysis(analysis_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="분석 데이터를 읽을 수 없습니다.")
 
-    if data["status"] not in ["completed", "summary_completed"]:
+    if data.get("status") not in ["completed", "summary_completed"]:
         return {
             "analysis_id": analysis_id,
             "status": data["status"],
@@ -504,14 +521,16 @@ async def get_gcode_dashboard(analysis_id: str):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
 
     data = get_analysis(analysis_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="분석 데이터를 읽을 수 없습니다.")
 
-    if data["status"] not in ["completed", "summary_completed"]:
+    if data.get("status") not in ["completed", "summary_completed"]:
         raise HTTPException(
             status_code=400,
             detail={
                 "message": "분석이 아직 완료되지 않았습니다.",
-                "status": data["status"],
-                "progress": data["progress"]
+                "status": data.get("status", "unknown"),
+                "progress": data.get("progress", 0)
             }
         )
 
@@ -568,13 +587,16 @@ async def get_gcode_analysis_status(analysis_id: str):
         raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
 
     data = get_analysis(analysis_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="분석 데이터를 읽을 수 없습니다.")
+
     return {
         "analysis_id": analysis_id,
-        "status": data["status"],
-        "progress": data["progress"],
-        "current_step": data["current_step"],
+        "status": data.get("status", "unknown"),
+        "progress": data.get("progress", 0),
+        "current_step": data.get("current_step", ""),
         "progress_message": data.get("progress_message", ""),  # 실시간 메시지
-        "timeline": data["timeline"],
+        "timeline": data.get("timeline", []),
         "result": data.get("result"),
         "error": data.get("error")
     }
@@ -958,3 +980,164 @@ async def run_gcode_error_analysis_task(analysis_id: str):
             "error_trace": traceback.format_exc()
         })
         logger.error(f"[GCode] Error analysis failed: {analysis_id} - {e}")
+
+
+# ============================================================
+# Segment + LLM Streaming Analysis API
+# ============================================================
+
+@router.post("/analyze-with-segments")
+async def analyze_gcode_with_segments(request: GCodeSegmentAnalysisRequest, background_tasks: BackgroundTasks):
+    """
+    세그먼트 추출 + LLM 분석 (스트리밍)
+
+    **2단계 응답 방식:**
+    1. 세그먼트 데이터 (Float32Array + Base64) 즉시 반환 (~1-3초)
+    2. LLM 분석 백그라운드 실행, 완료 시 SSE로 전송
+
+    **사용 방법:**
+    1. 이 엔드포인트 호출 → segments 데이터 즉시 수신
+    2. analysis_id로 SSE 스트림 연결 → LLM 분석 진행률 & 결과 수신
+
+    **응답 예시:**
+    ```json
+    {
+        "analysis_id": "xxx",
+        "status": "segments_ready",
+        "segments": {
+            "layers": [
+                {
+                    "layerNum": 0,
+                    "z": 0.2,
+                    "extrusionData": "base64...",
+                    "travelData": "base64...",
+                    "extrusionCount": 1234,
+                    "travelCount": 567
+                },
+                ...
+            ],
+            "metadata": { ... }
+        },
+        "llm_analysis_started": true,
+        "stream_url": "/api/v1/gcode/analysis/{analysis_id}/stream"
+    }
+    ```
+    """
+    from gcode_analyzer.segment_extractor import extract_segments, EncodingError
+
+    # Rate Limit 체크
+    limiter = get_rate_limiter()
+    estimated_tokens = limiter.estimate_tokens(request.gcode_content)
+
+    try:
+        await limiter.acquire(
+            user_id=request.user_id,
+            estimated_tokens=estimated_tokens,
+            timeout=30.0
+        )
+    except RateLimitError as e:
+        logger.warning(f"[GCode] Rate limit exceeded for user {request.user_id}: {e}")
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": e.error_code,
+                "message": str(e),
+                "retry_after": e.retry_after
+            },
+            headers={"Retry-After": str(int(e.retry_after))}
+        )
+
+    analysis_id = request.analysis_id or str(uuid.uuid4())
+
+    # 임시 파일 생성
+    output_dir = os.getenv("OUTPUT_DIR", "./output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    temp_file_path = os.path.join(output_dir, f"gcode_segment_{analysis_id}.gcode")
+    with open(temp_file_path, 'w', encoding='utf-8') as f:
+        f.write(request.gcode_content)
+
+    # 1단계: 세그먼트 추출 (즉시)
+    try:
+        segments = extract_segments(temp_file_path, binary_format=request.binary_format)
+    except EncodingError as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "encoding_error",
+                "message": str(e),
+                "analysis_id": analysis_id
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "segment_extraction_failed",
+                "message": str(e),
+                "analysis_id": analysis_id
+            }
+        )
+
+    # 분석 상태 초기화
+    initial_data = {
+        "status": "segments_ready",
+        "progress": 0.2,  # 세그먼트 추출 완료
+        "current_step": "segments_extracted",
+        "timeline": [{
+            "step": 1,
+            "label": f"세그먼트 추출 완료 ({segments['metadata']['layerCount']}개 레이어)",
+            "status": "done",
+            "timestamp": datetime.now().isoformat()
+        }],
+        "temp_file": temp_file_path,
+        "printer_info": request.printer_info.dict() if request.printer_info else None,
+        "filament_type": request.filament_type,
+        "user_id": request.user_id,
+        "language": request.language or "ko",
+        "segments": segments,  # 세그먼트 데이터 저장
+        "result": None,
+        "error": None,
+        "created_at": datetime.now().isoformat()
+    }
+    set_analysis(analysis_id, initial_data)
+
+    logger.info(f"[GCode] Segments extracted: {analysis_id} (layers={segments['metadata']['layerCount']})")
+
+    # 2단계: LLM 분석 백그라운드 실행
+    background_tasks.add_task(run_gcode_analysis_task, analysis_id)
+
+    return {
+        "analysis_id": analysis_id,
+        "status": "segments_ready",
+        "segments": segments,
+        "llm_analysis_started": True,
+        "message": "세그먼트 추출 완료. LLM 분석이 백그라운드에서 진행됩니다.",
+        "stream_url": f"/api/v1/gcode/analysis/{analysis_id}/stream"
+    }
+
+
+@router.get("/analysis/{analysis_id}/segments")
+async def get_gcode_segments(analysis_id: str):
+    """
+    세그먼트 데이터만 조회
+
+    분석 완료 전에도 세그먼트 데이터를 즉시 반환합니다.
+    (analyze-with-segments로 시작한 경우)
+    """
+    if not exists(analysis_id):
+        raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
+
+    data = get_analysis(analysis_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="분석 데이터를 읽을 수 없습니다.")
+
+    segments = data.get("segments")
+    if not segments:
+        raise HTTPException(status_code=400, detail="세그먼트 데이터가 없습니다. /analyze-with-segments를 사용하세요.")
+
+    return {
+        "analysis_id": analysis_id,
+        "status": data.get("status", "unknown"),
+        "segments": segments
+    }

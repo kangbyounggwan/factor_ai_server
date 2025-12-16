@@ -3,12 +3,38 @@
 멀티 워커 환경에서 상태를 공유하기 위한 파일 기반 저장소
 """
 import os
+import sys
 import json
-import fcntl
 import time
 from typing import Dict, Any, Optional
 from datetime import datetime
 import logging
+
+# 크로스 플랫폼 파일 잠금
+if sys.platform == 'win32':
+    import msvcrt
+
+    def _lock_file(f, exclusive=True):
+        """Windows 파일 잠금"""
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if exclusive else msvcrt.LK_NBRLCK, 1)
+
+    def _unlock_file(f):
+        """Windows 파일 잠금 해제"""
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        except:
+            pass
+else:
+    import fcntl
+
+    def _lock_file(f, exclusive=True):
+        """Unix 파일 잠금"""
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+
+    def _unlock_file(f):
+        """Unix 파일 잠금 해제"""
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -27,12 +53,14 @@ def _get_file_path(analysis_id: str) -> str:
     return os.path.join(STORE_DIR, f"{analysis_id}.json")
 
 
-def get_analysis(analysis_id: str) -> Optional[Dict[str, Any]]:
+def get_analysis(analysis_id: str, max_retries: int = 3, retry_delay: float = 0.1) -> Optional[Dict[str, Any]]:
     """
-    분석 상태 조회
+    분석 상태 조회 (재시도 로직 포함)
 
     Args:
         analysis_id: 분석 ID
+        max_retries: 최대 재시도 횟수
+        retry_delay: 재시도 간격 (초)
 
     Returns:
         분석 데이터 딕셔너리 또는 None
@@ -42,17 +70,31 @@ def get_analysis(analysis_id: str) -> Optional[Dict[str, Any]]:
     if not os.path.exists(file_path):
         return None
 
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # 공유 잠금
-            try:
-                data = json.load(f)
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        return data
-    except Exception as e:
-        logger.error(f"[FileStore] Failed to read {analysis_id}: {e}")
-        return None
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                try:
+                    _lock_file(f, exclusive=False)  # 공유 잠금
+                except:
+                    pass  # 잠금 실패해도 계속 진행
+                try:
+                    data = json.load(f)
+                finally:
+                    _unlock_file(f)
+            return data
+        except PermissionError as e:
+            # 파일이 다른 프로세스에서 쓰이고 있음 - 재시도
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))  # 점진적 대기
+                continue
+        except Exception as e:
+            logger.error(f"[FileStore] Failed to read {analysis_id}: {e}")
+            return None
+
+    logger.warning(f"[FileStore] Failed to read {analysis_id} after {max_retries} retries: {last_error}")
+    return None
 
 
 def set_analysis(analysis_id: str, data: Dict[str, Any]) -> bool:
@@ -72,11 +114,14 @@ def set_analysis(analysis_id: str, data: Dict[str, Any]) -> bool:
         # 임시 파일에 먼저 쓰고 원자적으로 이동
         temp_path = f"{file_path}.tmp"
         with open(temp_path, 'w', encoding='utf-8') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # 배타적 잠금
+            try:
+                _lock_file(f, exclusive=True)  # 배타적 잠금
+            except:
+                pass  # 잠금 실패해도 계속 진행
             try:
                 json.dump(data, f, ensure_ascii=False, indent=2, default=str)
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                _unlock_file(f)
 
         # 원자적 이동
         os.replace(temp_path, file_path)

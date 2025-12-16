@@ -38,11 +38,15 @@ class AnomalyType(str, Enum):
     RAPID_TEMP_CHANGE = "rapid_temp_change"
     LOW_TEMP = "low_temp"
     BED_TEMP_OFF_EARLY = "bed_temp_off_early"
+    # 속도 관련
+    EXCESSIVE_SPEED = "excessive_speed"          # 과도한 속도
+    INCONSISTENT_SPEED = "inconsistent_speed"    # 일관성 없는 속도 변화
+    ZERO_SPEED_EXTRUSION = "zero_speed_extrusion"  # 속도 0에서 익스트루전
 
 class Anomaly(BaseModel):
     type: AnomalyType
     line_index: int
-    severity: str  # low, medium, high
+    severity: str  # critical, high, medium, low (critical=즉시 출력 금지)
     temp_before: Optional[float] = None
     temp_after: Optional[float] = None
     message: str
@@ -53,7 +57,7 @@ class IssueDetail(BaseModel):
     id: str                 # 식별자 (ISSUE-001)
     line: int               # 발생 라인
     type: str               # 문제 유형
-    severity: str           # high, medium, low
+    severity: str           # critical, high, medium, low (critical=출력 금지 수준)
     title: str              # 문제 제목 (한글)
     description: str        # 상세 설명
     fix_proposal: str       # 수정 제안

@@ -23,8 +23,8 @@ def main():
 
     if args.command == "summarize":
         try:
-            parsed = parse_gcode(args.file)
-            summary = summarize_gcode(parsed)
+            parse_result = parse_gcode(args.file)
+            summary = summarize_gcode(parse_result.lines)
             print(json.dumps(summary.dict(), indent=2, ensure_ascii=False))
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)

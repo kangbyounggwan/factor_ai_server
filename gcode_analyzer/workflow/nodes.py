@@ -41,9 +41,10 @@ def parse_node(state: AnalysisState) -> Dict[str, Any]:
     G-code 파싱 및 구간 분류
     """
     file_path = state["file_path"]
-    
-    # 파싱
-    parsed_lines = parse_gcode(file_path)
+
+    # 파싱 (ParseResult 객체 반환)
+    parse_result = parse_gcode(file_path)
+    parsed_lines = parse_result.lines
     total_lines = len(parsed_lines)
 
     # 구간 분류
@@ -417,7 +418,7 @@ def final_output_node(state: AnalysisState) -> Dict[str, Any]:
     # 1. 패치 계획 생성 (Expert Assessment의 critical_issues 기반)
     # Expert Assessment가 선별한 최종 이슈들
     critical_issues = expert_result.get("critical_issues", [])
-    
+
     patch_plan = None
     if critical_issues:
         # Patcher 호환 변환
@@ -430,39 +431,54 @@ def final_output_node(state: AnalysisState) -> Dict[str, Any]:
                 "fix_action": issue.get("fix_proposal"),
                 "description": issue.get("description"),
                 "original_line": "N/A", # line_index로 조회 필요하지만 generate_patch_plan에서 함
-                "priority": 1
+                "priority": 1,
+                "issue_id": issue.get("id")  # 이슈 ID 연결
             })
-            
+
         patch_plan = generate_patch_plan(
             issues=patch_candidates,
             lines=state["parsed_lines"],
             file_path=state["file_path"]
         )
+
+    # 2. 패치에 ID 부여 및 이슈-패치 매핑 생성
+    patch_id_map = {}  # line_index -> patch_id
+    if patch_plan:
+        for idx, patch in enumerate(patch_plan.patches):
+            patch_id = f"PATCH-{idx + 1:03d}"
+            patch_id_map[patch.line_index] = patch_id
+
+    # 3. critical_issues에 patch_id 추가
+    issues_with_patch = []
+    for issue in critical_issues:
+        issue_line = issue.get("line")
+        patch_id = patch_id_map.get(issue_line)  # 매칭되는 패치 ID (없으면 None)
+
+        issues_with_patch.append({
+            **issue,
+            "patch_id": patch_id,  # 연결된 패치 ID (없으면 null)
+            "layer": layer_map.get(issue_line, 0)
+        })
     
-    # 2. 최종 결과 딕셔너리 구성
+    # 4. 최종 결과 딕셔너리 구성
     final_output = {
-        "expert_assessment": expert_result,
-        
+        "expert_assessment": {
+            **expert_result,
+            # critical_issues를 patch_id가 포함된 버전으로 교체
+            "critical_issues": issues_with_patch
+        },
+
         # Legacy UI Compatibility
         "overall_quality_score": expert_result.get("quality_score"),
         "total_issues_found": len(critical_issues),
-        "critical_issues": len([i for i in critical_issues if i.get("severity") == "high"]),
+        "critical_issues_count": len([i for i in critical_issues if i.get("severity") in ["critical", "high"]]),
         "summary": expert_result.get("summary_text"),
         "issue_summary": expert_result.get("summary_text"),
         "recommendation": "\n".join(expert_result.get("overall_recommendations", [])),
-        "issues_by_priority": [
-            {
-                "priority": idx+1,
-                "issue_type": idx_issue.get("type"),
-                "line_index": idx_issue.get("line"),
-                "layer": layer_map.get(idx_issue.get("line", 0), 0),  # 레이어 번호 추가
-                "description": idx_issue.get("description"),
-                "fix_action": idx_issue.get("fix_proposal"),
-                "severity": idx_issue.get("severity")
-            }
-            for idx, idx_issue in enumerate(critical_issues)
-        ],
-        
+
+        # 이슈 목록 (patch_id 포함)
+        "issues": issues_with_patch,
+
         "analysis_stats": {
              "total_lines": comprehensive_summary.get("total_lines"),
              "print_time": comprehensive_summary.get("print_time", {}).get("formatted_time"),
@@ -484,22 +500,37 @@ def final_output_node(state: AnalysisState) -> Dict[str, Any]:
             "timestamp": datetime.now().isoformat()
         })
 
+    # 5. 패치 목록에 ID 부여
+    patches_with_id = []
+    if patch_plan:
+        for idx, p in enumerate(patch_plan.patches):
+            patch_id = f"PATCH-{idx + 1:03d}"
+            # 이 패치와 연결된 이슈 ID 찾기
+            linked_issue_id = None
+            for issue in issues_with_patch:
+                if issue.get("line") == p.line_index:
+                    linked_issue_id = issue.get("id")
+                    break
+
+            patches_with_id.append({
+                "id": patch_id,  # 패치 고유 ID
+                "issue_id": linked_issue_id,  # 연결된 이슈 ID
+                "line_index": p.line_index,
+                "layer": layer_map.get(p.line_index, 0),
+                "original_line": p.original_line,
+                "action": p.action,
+                "new_line": p.new_line,
+                "reason": p.reason,
+                "issue_type": p.issue_type,
+                "autofix_allowed": getattr(p, 'autofix_allowed', True)
+            })
+
     return {
         "final_summary": final_output,
         "patch_plan": {
              "file_path": patch_plan.file_path if patch_plan else None,
              "total_patches": patch_plan.total_patches if patch_plan else 0,
-             "patches": [
-                 {
-                     "line_index": p.line_index,
-                     "layer": layer_map.get(p.line_index, 0),  # 레이어 번호 추가
-                     "original_line": p.original_line,
-                     "action": p.action,
-                     "new_line": p.new_line,
-                     "reason": p.reason,
-                     "issue_type": p.issue_type
-                 } for p in patch_plan.patches
-             ] if patch_plan else [],
+             "patches": patches_with_id,
              "estimated_improvement": patch_plan.estimated_quality_improvement if patch_plan else 0
         } if patch_plan else None,
         "current_step": "final_output",

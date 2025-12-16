@@ -7,12 +7,60 @@ G-code 분석 룰 엔진
 2. RULES 리스트에 추가
 3. 자동으로 분석에 포함됨
 """
-from typing import List, Callable, Dict, Any
+from typing import List, Callable, Dict, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
+import re
 
 from .models import GCodeLine, TempEvent, Anomaly, AnomalyType
 from .section_detector import SectionBoundaries, GCodeSection, get_section_for_event
+
+
+# ============================================================
+# 벤더 확장 코드 감지 (H코드 등)
+# ============================================================
+def _detect_vendor_h_param(raw_line: str) -> Optional[Dict[str, Any]]:
+    """
+    Bambu/Orca 등 벤더 확장 H 파라미터 감지
+
+    예시:
+    - M109 S25 H140 → H=140 (실제 온도), S=25 (대기 시간 또는 다른 의미)
+    - M104 H210 → H=210 (실제 온도)
+
+    Returns:
+        {"H": 온도값, "vendor": "bambu"} 또는 None
+    """
+    if not raw_line:
+        return None
+
+    # H 파라미터 감지 (온도 관련 명령에서)
+    h_match = re.search(r'\bH(\d+(?:\.\d+)?)', raw_line, re.IGNORECASE)
+    if h_match:
+        h_value = float(h_match.group(1))
+        return {
+            "H": h_value,
+            "vendor": "bambu",
+            "note": "제조사 커스텀 코드 - H 파라미터가 실제 온도값일 수 있음"
+        }
+
+    return None
+
+
+def _is_vendor_extended_temp_cmd(line: GCodeLine) -> Optional[Dict[str, Any]]:
+    """
+    온도 명령에서 벤더 확장이 있는지 확인
+
+    Bambu/Orca에서:
+    - M109 S25 H140: S는 대기 시간, H가 실제 온도
+    - 이 경우 S값을 온도로 해석하면 안 됨
+
+    Returns:
+        벤더 확장 정보 또는 None
+    """
+    if line.cmd not in ["M104", "M109", "M140", "M190"]:
+        return None
+
+    return _detect_vendor_h_param(line.raw)
 
 # ============================================================
 # 룰 정의 타입
@@ -42,28 +90,66 @@ def rule_early_temp_off(
 ) -> List[RuleResult]:
     """
     규칙: 출력 중간(BODY)에서 온도가 0으로 설정됨
+
+    주의: Bambu/Orca 등에서 H 파라미터가 있으면 S값이 온도가 아닐 수 있음
+    - M109 S25 H140 → S=대기시간, H=실제 온도
     """
     results = []
-    
+
+    # 라인 인덱스로 원본 라인 찾기 위한 맵 생성
+    line_map = {line.index: line for line in lines}
+
     for event in temp_events:
         section, _ = get_section_for_event(event.line_index, boundaries)
-        
-        # BODY에서 온도 0 설정 = 문제
+
+        # BODY에서 온도 0 설정
         if section == GCodeSection.BODY and event.temp == 0:
-            results.append(RuleResult(
-                rule_name="early_temp_off",
-                triggered=True,
-                anomaly=Anomaly(
-                    type=AnomalyType.EARLY_TEMP_OFF,
-                    line_index=event.line_index,
-                    severity="high",
-                    message=f"출력 중간(BODY)에서 온도 0 설정 ({event.cmd})",
-                    context={"section": section.value, "cmd": event.cmd}
-                ),
-                confidence=0.95,
-                needs_llm_review=True
-            ))
-    
+            # 원본 라인에서 벤더 확장(H 파라미터) 확인
+            original_line = line_map.get(event.line_index)
+            vendor_ext = None
+            if original_line:
+                vendor_ext = _is_vendor_extended_temp_cmd(original_line)
+
+            # H 파라미터가 있으면 → 주의(warning)로 다운그레이드
+            if vendor_ext and vendor_ext.get("H", 0) > 0:
+                actual_temp = vendor_ext.get("H", 0)
+                results.append(RuleResult(
+                    rule_name="early_temp_off",
+                    triggered=True,
+                    anomaly=Anomaly(
+                        type=AnomalyType.EARLY_TEMP_OFF,
+                        line_index=event.line_index,
+                        severity="warning",  # critical → warning 다운그레이드
+                        message=f"[주의] 제조사 커스텀 코드 감지 ({event.cmd} S0 H{actual_temp}) - H 파라미터가 실제 온도({actual_temp}°C)일 수 있음, 확인 필요",
+                        context={
+                            "section": section.value,
+                            "cmd": event.cmd,
+                            "s_value": 0,
+                            "h_value": actual_temp,
+                            "vendor": vendor_ext.get("vendor"),
+                            "vendor_extension": True,
+                            "note": "Bambu/Orca 슬라이서의 H 파라미터는 실제 타겟 온도를 의미할 수 있습니다"
+                        }
+                    ),
+                    confidence=0.6,  # 낮은 신뢰도 - LLM 검토 필요
+                    needs_llm_review=True  # LLM이 최종 판단
+                ))
+            else:
+                # H 파라미터 없음 → 진짜 치명적 문제
+                results.append(RuleResult(
+                    rule_name="early_temp_off",
+                    triggered=True,
+                    anomaly=Anomaly(
+                        type=AnomalyType.EARLY_TEMP_OFF,
+                        line_index=event.line_index,
+                        severity="critical",  # 진짜 critical
+                        message=f"[치명적] 출력 중 온도 0°C 설정 ({event.cmd}) - 콜드 익스트루전 위험, 출력 금지",
+                        context={"section": section.value, "cmd": event.cmd, "temp": 0}
+                    ),
+                    confidence=0.99,
+                    needs_llm_review=False  # 이건 LLM 검토 불필요, 무조건 문제
+                ))
+
     return results
 
 def rule_cold_extrusion(
@@ -73,39 +159,101 @@ def rule_cold_extrusion(
 ) -> List[RuleResult]:
     """
     규칙: 노즐 온도가 낮은 상태에서 익스트루전 시도
+
+    주의: Bambu/Orca 등에서 H 파라미터가 있으면 S값이 온도가 아닐 수 있음
+    - M109 S25 H140 → S=대기시간, H=실제 온도
     """
     results = []
     current_temp = 0.0
+    current_h_temp = None  # 벤더 확장 H 파라미터 온도
+    has_vendor_extension = False
     SAFE_TEMP = 150.0  # 기본값 (설정 가능)
-    
+
     for line in lines:
         # 온도 업데이트
         if line.cmd in ["M104", "M109"]:
-            if "S" in line.params:
+            # 벤더 확장(H 파라미터) 확인
+            vendor_ext = _is_vendor_extended_temp_cmd(line)
+            if vendor_ext and vendor_ext.get("H", 0) > 0:
+                # H 파라미터가 있으면 이를 실제 온도로 사용
+                current_h_temp = vendor_ext.get("H", 0)
+                current_temp = current_h_temp  # H를 실제 온도로 취급
+                has_vendor_extension = True
+            elif "S" in line.params:
                 current_temp = line.params["S"]
-        
+                current_h_temp = None
+                has_vendor_extension = False
+
         # 익스트루전 체크
         if line.cmd in ["G1", "G0"] and "E" in line.params:
             e_val = line.params.get("E", 0)
             section, _ = get_section_for_event(line.index, boundaries)
-            
+
             # BODY에서 낮은 온도로 익스트루전
             if section == GCodeSection.BODY and current_temp < SAFE_TEMP and e_val > 0:
-                results.append(RuleResult(
-                    rule_name="cold_extrusion",
-                    triggered=True,
-                    anomaly=Anomaly(
-                        type=AnomalyType.COLD_EXTRUSION,
-                        line_index=line.index,
-                        severity="high",
-                        message=f"낮은 온도({current_temp}°C)에서 익스트루전 시도",
-                        context={"temp": current_temp, "e_val": e_val, "safe_temp": SAFE_TEMP}
-                    ),
-                    confidence=0.9,
-                    needs_llm_review=True
-                ))
-                break  # 첫 번째만 보고
-    
+                # 벤더 확장이 있고 H 온도가 정상 범위면 → 주의로 다운그레이드
+                if has_vendor_extension and current_h_temp and current_h_temp >= SAFE_TEMP:
+                    results.append(RuleResult(
+                        rule_name="cold_extrusion",
+                        triggered=True,
+                        anomaly=Anomaly(
+                            type=AnomalyType.COLD_EXTRUSION,
+                            line_index=line.index,
+                            severity="warning",  # critical → warning 다운그레이드
+                            message=f"[주의] 제조사 커스텀 코드 사용 중 - H 파라미터({current_h_temp}°C)가 실제 온도일 수 있음",
+                            context={
+                                "s_temp": line.params.get("S", 0),
+                                "h_temp": current_h_temp,
+                                "e_val": e_val,
+                                "safe_temp": SAFE_TEMP,
+                                "vendor_extension": True,
+                                "note": "Bambu/Orca 슬라이서의 H 파라미터는 실제 타겟 온도를 의미할 수 있습니다"
+                            }
+                        ),
+                        confidence=0.5,  # 낮은 신뢰도
+                        needs_llm_review=True
+                    ))
+                    break
+                # 온도 0°C는 critical, 그 외 낮은 온도는 high
+                elif current_temp == 0:
+                    severity = "critical"
+                    message = f"[치명적] 온도 0°C에서 익스트루전 시도 - 노즐 막힘, 모터 손상 위험"
+                    needs_review = False
+
+                    results.append(RuleResult(
+                        rule_name="cold_extrusion",
+                        triggered=True,
+                        anomaly=Anomaly(
+                            type=AnomalyType.COLD_EXTRUSION,
+                            line_index=line.index,
+                            severity=severity,
+                            message=message,
+                            context={"temp": current_temp, "e_val": e_val, "safe_temp": SAFE_TEMP}
+                        ),
+                        confidence=0.95,
+                        needs_llm_review=needs_review
+                    ))
+                    break  # 첫 번째만 보고
+                else:
+                    severity = "high"
+                    message = f"낮은 온도({current_temp}°C)에서 익스트루전 시도 (권장: {SAFE_TEMP}°C 이상)"
+                    needs_review = True
+
+                    results.append(RuleResult(
+                        rule_name="cold_extrusion",
+                        triggered=True,
+                        anomaly=Anomaly(
+                            type=AnomalyType.COLD_EXTRUSION,
+                            line_index=line.index,
+                            severity=severity,
+                            message=message,
+                            context={"temp": current_temp, "e_val": e_val, "safe_temp": SAFE_TEMP}
+                        ),
+                        confidence=0.9,
+                        needs_llm_review=needs_review
+                    ))
+                    break  # 첫 번째만 보고
+
     return results
 
 def rule_rapid_temp_change(
@@ -306,17 +454,323 @@ def rule_unexpected_temp_change_in_body(
     return results
 
 # ============================================================
+# 속도 관련 규칙들
+# ============================================================
+
+# 속도 기준값 (G-code F 값은 mm/min 단위)
+# mm/s로 변환: F값 / 60
+SPEED_THRESHOLDS = {
+    # 최대 속도 제한 (mm/s 기준)
+    "max_print_speed_mms": 500,      # 500 mm/s (극한 속도, F30000)
+    "max_travel_speed_mms": 700,     # 700 mm/s (최대 travel, F42000)
+    "max_reasonable_print_mms": 300, # 300 mm/s (합리적 최대, F18000)
+
+    # 최소 속도 제한
+    "min_print_speed_mms": 5,        # 5 mm/s (너무 느림, F300)
+
+    # 품질 권장 범위 (Bambu/Orca 기준)
+    "quality_print_min_mms": 30,     # 30 mm/s (고품질)
+    "quality_print_max_mms": 150,    # 150 mm/s (표준 품질)
+
+    # 급격한 속도 변화 임계값
+    "rapid_change_threshold_mms": 100,  # 100 mm/s 이상 급변
+}
+
+
+def rule_excessive_print_speed(
+    lines: List[GCodeLine],
+    temp_events: List[TempEvent],
+    boundaries: SectionBoundaries
+) -> List[RuleResult]:
+    """
+    규칙: 과도하게 빠른 출력 속도 감지
+
+    Bambu/Orca 기준:
+    - 일반 출력: 70-150 mm/s
+    - 빠른 출력: 150-300 mm/s
+    - 극한 출력: 300+ mm/s (품질 저하 위험)
+
+    Note: G-code F값은 mm/min 단위
+    Note: F값은 한 번 설정되면 이후 명령에서 생략될 수 있음 (상태 추적 필요)
+    """
+    results = []
+    MAX_REASONABLE = SPEED_THRESHOLDS["max_reasonable_print_mms"] * 60  # → mm/min
+    MAX_EXTREME = SPEED_THRESHOLDS["max_print_speed_mms"] * 60
+
+    excessive_count = 0
+    extreme_count = 0
+    first_excessive_line = None
+    max_speed_found = 0
+    current_f = 0.0  # 현재 F값 추적
+
+    for line in lines:
+        # F값 업데이트 (G0, G1 모두에서)
+        if line.cmd in ["G0", "G1"] and "F" in line.params:
+            current_f = line.params["F"]
+
+        section, _ = get_section_for_event(line.index, boundaries)
+
+        # BODY 구간에서만 체크
+        if section != GCodeSection.BODY:
+            continue
+
+        # G1 명령어 + E (출력 이동) - F는 현재 추적값 사용
+        if line.cmd == "G1" and "E" in line.params:
+            e_val = line.params.get("E", 0)
+
+            # 양의 E = 실제 출력
+            if e_val > 0 and current_f > 0:
+                if current_f > max_speed_found:
+                    max_speed_found = current_f
+
+                if current_f > MAX_EXTREME:
+                    extreme_count += 1
+                    if first_excessive_line is None:
+                        first_excessive_line = line.index
+                elif current_f > MAX_REASONABLE:
+                    excessive_count += 1
+                    if first_excessive_line is None:
+                        first_excessive_line = line.index
+
+    # 극한 속도 발견 (500+ mm/s)
+    if extreme_count > 0:
+        results.append(RuleResult(
+            rule_name="excessive_print_speed",
+            triggered=True,
+            anomaly=Anomaly(
+                type=AnomalyType.EXCESSIVE_SPEED,
+                line_index=first_excessive_line or 0,
+                severity="high",
+                message=f"극한 출력 속도 감지: {max_speed_found/60:.0f} mm/s (권장 최대: {SPEED_THRESHOLDS['max_reasonable_print_mms']} mm/s)",
+                context={
+                    "max_speed_mms": round(max_speed_found / 60, 1),
+                    "max_speed_mmmin": max_speed_found,
+                    "extreme_count": extreme_count,
+                    "threshold_mms": SPEED_THRESHOLDS["max_print_speed_mms"]
+                }
+            ),
+            confidence=0.85,
+            needs_llm_review=True
+        ))
+    elif excessive_count > 10:  # 빠른 속도가 자주 나타나면
+        results.append(RuleResult(
+            rule_name="excessive_print_speed",
+            triggered=True,
+            anomaly=Anomaly(
+                type=AnomalyType.EXCESSIVE_SPEED,
+                line_index=first_excessive_line or 0,
+                severity="medium",
+                message=f"빠른 출력 속도 빈번: 최대 {max_speed_found/60:.0f} mm/s ({excessive_count}회 초과)",
+                context={
+                    "max_speed_mms": round(max_speed_found / 60, 1),
+                    "excessive_count": excessive_count,
+                    "threshold_mms": SPEED_THRESHOLDS["max_reasonable_print_mms"]
+                }
+            ),
+            confidence=0.7,
+            needs_llm_review=True
+        ))
+
+    return results
+
+
+def rule_too_slow_print_speed(
+    lines: List[GCodeLine],
+    temp_events: List[TempEvent],
+    boundaries: SectionBoundaries
+) -> List[RuleResult]:
+    """
+    규칙: 너무 느린 출력 속도 감지
+
+    5 mm/s (F300) 미만은 거의 정지 수준으로, 의도적이지 않은 경우 문제
+    Note: F값은 한 번 설정되면 이후 명령에서 생략될 수 있음
+    """
+    results = []
+    MIN_SPEED = SPEED_THRESHOLDS["min_print_speed_mms"] * 60  # → mm/min
+
+    slow_count = 0
+    first_slow_line = None
+    min_speed_found = float('inf')
+    current_f = 0.0  # 현재 F값 추적
+
+    for line in lines:
+        # F값 업데이트
+        if line.cmd in ["G0", "G1"] and "F" in line.params:
+            current_f = line.params["F"]
+
+        section, _ = get_section_for_event(line.index, boundaries)
+
+        if section != GCodeSection.BODY:
+            continue
+
+        # G1 + E (출력 이동)에서 매우 느린 속도
+        if line.cmd == "G1" and "E" in line.params:
+            e_val = line.params.get("E", 0)
+
+            if e_val > 0 and 0 < current_f < MIN_SPEED:
+                slow_count += 1
+                if current_f < min_speed_found:
+                    min_speed_found = current_f
+                if first_slow_line is None:
+                    first_slow_line = line.index
+
+    if slow_count > 5:  # 5회 이상 발생
+        results.append(RuleResult(
+            rule_name="too_slow_print_speed",
+            triggered=True,
+            anomaly=Anomaly(
+                type=AnomalyType.INCONSISTENT_SPEED,
+                line_index=first_slow_line or 0,
+                severity="low",
+                message=f"매우 느린 출력 속도 감지: {min_speed_found/60:.1f} mm/s ({slow_count}회)",
+                context={
+                    "min_speed_mms": round(min_speed_found / 60, 2),
+                    "min_speed_mmmin": min_speed_found,
+                    "slow_count": slow_count,
+                    "threshold_mms": SPEED_THRESHOLDS["min_print_speed_mms"]
+                }
+            ),
+            confidence=0.6,
+            needs_llm_review=True
+        ))
+
+    return results
+
+
+def rule_zero_speed_extrusion(
+    lines: List[GCodeLine],
+    temp_events: List[TempEvent],
+    boundaries: SectionBoundaries
+) -> List[RuleResult]:
+    """
+    규칙: 속도 0 또는 F값 없이 익스트루전 시도
+
+    이는 명백한 오류로, 프린터가 멈춘 상태에서 필라멘트만 밀어내는 상황
+    """
+    results = []
+    current_f = 0.0
+
+    for line in lines:
+        section, _ = get_section_for_event(line.index, boundaries)
+
+        # F값 추적
+        if line.cmd in ["G0", "G1"] and "F" in line.params:
+            current_f = line.params["F"]
+
+        # BODY에서 F=0 또는 F 미설정 상태로 익스트루전
+        if section == GCodeSection.BODY and line.cmd == "G1":
+            if "E" in line.params and line.params.get("E", 0) > 0:
+                if current_f == 0:
+                    results.append(RuleResult(
+                        rule_name="zero_speed_extrusion",
+                        triggered=True,
+                        anomaly=Anomaly(
+                            type=AnomalyType.ZERO_SPEED_EXTRUSION,
+                            line_index=line.index,
+                            severity="high",
+                            message="속도 0 (F=0) 상태에서 익스트루전 시도 - 프린터 정지 상태에서 필라멘트 압출",
+                            context={"current_f": current_f, "e_val": line.params.get("E", 0)}
+                        ),
+                        confidence=0.95,
+                        needs_llm_review=False
+                    ))
+                    break  # 첫 번째만
+
+    return results
+
+
+def rule_rapid_speed_change(
+    lines: List[GCodeLine],
+    temp_events: List[TempEvent],
+    boundaries: SectionBoundaries
+) -> List[RuleResult]:
+    """
+    규칙: 급격한 속도 변화 감지
+
+    출력 중 100 mm/s 이상 급변은 품질 저하 및 기계적 스트레스 유발
+    Note: F값은 한 번 설정되면 이후 명령에서 생략될 수 있음 (상태 추적 필요)
+    """
+    results = []
+    THRESHOLD = SPEED_THRESHOLDS["rapid_change_threshold_mms"] * 60  # → mm/min
+
+    current_f = 0.0  # 현재 F값 추적
+    prev_print_speed = None
+    rapid_changes = []
+
+    for line in lines:
+        # F값 업데이트 (G0, G1 모두에서)
+        if line.cmd in ["G0", "G1"] and "F" in line.params:
+            current_f = line.params["F"]
+
+        section, _ = get_section_for_event(line.index, boundaries)
+
+        if section != GCodeSection.BODY:
+            continue
+
+        # G1 + E (출력 이동)의 속도 추적 - F는 현재 추적값 사용
+        if line.cmd == "G1" and "E" in line.params:
+            e_val = line.params.get("E", 0)
+            if e_val <= 0:
+                continue  # 리트랙션은 제외
+
+            if current_f > 0:
+                if prev_print_speed is not None:
+                    diff = abs(current_f - prev_print_speed)
+                    if diff >= THRESHOLD:
+                        rapid_changes.append({
+                            "line": line.index,
+                            "prev_mms": prev_print_speed / 60,
+                            "new_mms": current_f / 60,
+                            "diff_mms": diff / 60
+                        })
+
+                prev_print_speed = current_f
+
+    if len(rapid_changes) > 0:
+        # 가장 큰 변화 찾기
+        max_change = max(rapid_changes, key=lambda x: x["diff_mms"])
+
+        severity = "medium" if len(rapid_changes) < 10 else "high"
+
+        results.append(RuleResult(
+            rule_name="rapid_speed_change",
+            triggered=True,
+            anomaly=Anomaly(
+                type=AnomalyType.INCONSISTENT_SPEED,
+                line_index=max_change["line"],
+                severity=severity,
+                message=f"급격한 속도 변화 {len(rapid_changes)}회 감지. 최대: {max_change['prev_mms']:.0f} → {max_change['new_mms']:.0f} mm/s (차이: {max_change['diff_mms']:.0f} mm/s)",
+                context={
+                    "change_count": len(rapid_changes),
+                    "max_change": max_change,
+                    "threshold_mms": SPEED_THRESHOLDS["rapid_change_threshold_mms"]
+                }
+            ),
+            confidence=0.75,
+            needs_llm_review=True
+        ))
+
+    return results
+
+
+# ============================================================
 # 룰 엔진 레지스트리
 # ============================================================
 
 # 활성화된 규칙 목록 (새 규칙 추가 시 여기에 등록)
 RULES: List[RuleFunction] = [
+    # 온도 관련
     rule_early_temp_off,
     rule_cold_extrusion,
     rule_rapid_temp_change,
     rule_bed_temp_off_early,
     rule_low_temp_extrusion,
-    rule_unexpected_temp_change_in_body,  # BODY 구간 온도 변경 감지
+    rule_unexpected_temp_change_in_body,
+    # 속도 관련
+    rule_excessive_print_speed,
+    rule_too_slow_print_speed,
+    rule_zero_speed_extrusion,
+    rule_rapid_speed_change,
 ]
 
 def run_all_rules(

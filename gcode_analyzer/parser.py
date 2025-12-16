@@ -1,6 +1,16 @@
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from pydantic import BaseModel
 from .models import GCodeLine
+from dataclasses import dataclass
+
+
+@dataclass
+class ParseResult:
+    """G-code 파싱 결과"""
+    lines: List[GCodeLine]
+    encoding: str
+    is_fallback: bool  # latin-1 fallback으로 디코딩되었는지
+
 
 def parse_line(line: str, index: int) -> GCodeLine:
     """Parse a single G-code line."""
@@ -36,14 +46,43 @@ def parse_line(line: str, index: int) -> GCodeLine:
             
     return GCodeLine(index=index, raw=raw, cmd=cmd, params=params, comment=comment)
 
-def parse_gcode(file_path: str) -> List[GCodeLine]:
-    """Parse a G-code file into a list of structured GCodeLine objects."""
+def parse_gcode(file_path: str) -> ParseResult:
+    """Parse a G-code file into a list of structured GCodeLine objects.
+
+    Returns:
+        ParseResult with lines, encoding used, and fallback flag
+    """
     parsed_lines = []
-    # newline='\n'을 지정하여 CR만 있는 줄바꿈을 무시하고 LF 기반으로만 처리
-    # 이렇게 하면 CRLF(\r\n)도 정상적으로 하나의 줄로 처리됨
-    with open(file_path, 'r', encoding='utf-8', errors='replace', newline='\n') as f:
-        for i, line in enumerate(f):
-            # CR 문자가 줄 끝에 남아있으면 제거
-            line = line.rstrip('\r\n')
-            parsed_lines.append(parse_line(line, i + 1))
-    return parsed_lines
+
+    # 시도할 인코딩 목록 (우선순위 순)
+    encodings = ['utf-8', 'cp949', 'euc-kr']
+
+    content = None
+    used_encoding = None
+    is_fallback = False
+
+    # 바이너리로 읽어서 인코딩 시도
+    with open(file_path, 'rb') as f:
+        raw_bytes = f.read()
+
+    for encoding in encodings:
+        try:
+            content = raw_bytes.decode(encoding)
+            used_encoding = encoding
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    # 모든 인코딩 실패 시 latin-1로 강제 디코딩 (항상 성공)
+    if content is None:
+        content = raw_bytes.decode('latin-1', errors='replace')
+        used_encoding = 'latin-1 (fallback)'
+        is_fallback = True
+
+    # 줄 단위로 파싱
+    lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+
+    for i, line in enumerate(lines):
+        parsed_lines.append(parse_line(line, i + 1))
+
+    return ParseResult(lines=parsed_lines, encoding=used_encoding, is_fallback=is_fallback)

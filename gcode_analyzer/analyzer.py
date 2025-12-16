@@ -168,7 +168,8 @@ async def run_error_analysis_only(
 
     # 파싱 (기존 결과가 없으면 다시 수행)
     tracker.update(0.1, "parsing", "G-code 파싱 중...")
-    parsed_lines = parse_gcode(file_path)
+    parse_result = parse_gcode(file_path)
+    parsed_lines = parse_result.lines
     boundaries = detect_sections(parsed_lines)
     summary = summarize_gcode(parsed_lines)
     tracker.update(0.2, "parsing", f"파싱 완료: {len(parsed_lines):,}줄")
