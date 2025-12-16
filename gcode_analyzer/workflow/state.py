@@ -35,6 +35,9 @@ class AnalysisState(TypedDict):
     temp_events: List[Any]
     temp_changes: Dict[str, Any]                  # 온도 변화 전체 (노즐/베드)
     rule_results: List[Dict[str, Any]]            # 룰 엔진 결과
+    rule_confirmed_issues: List[Dict[str, Any]]   # 규칙 엔진에서 확정된 이슈 (LLM 리뷰 불필요)
+    rule_filtered_issues: List[Dict[str, Any]]   # Flash Lite 검증에서 필터링된 오탐
+    validation_tokens: Dict[str, int]            # 검증에 사용된 토큰
     event_analysis_results: List[Dict[str, Any]]  # Python 분석 결과
     events_needing_llm: List[Dict[str, Any]]      # LLM 분석 필요한 것만
     normal_events: List[Dict[str, Any]]           # 정상 이벤트

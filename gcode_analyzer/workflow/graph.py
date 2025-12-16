@@ -49,14 +49,18 @@ def create_analysis_workflow(mode: str = "full", progress_tracker: Optional[Prog
             progress_tracker.update(0.25, "comprehensive_summary", f"통계 분석 완료 (레이어 {layers}층)")
         return result
 
-    # 3. Analyze Events
-    def events_with_progress(state):
+    # 3. Analyze Events + Flash Lite 검증
+    async def events_with_progress(state):
         if progress_tracker:
             progress_tracker.update(0.30, "analyze_events", "온도 이벤트 분석 중...")
-        result = analyze_events_node(state)
+        result = await analyze_events_node(state)
         llm_count = len(result.get("events_needing_llm", []))
+        rule_count = len(result.get("rule_confirmed_issues", []))
+        filtered_count = len(result.get("rule_filtered_issues", []))
         if progress_tracker:
-            msg = f"이벤트 분석 완료: {llm_count}개 정밀 분석 대상"
+            msg = f"이벤트 분석 완료: 규칙 {rule_count}건 확정, {llm_count}개 정밀 분석 대상"
+            if filtered_count > 0:
+                msg += f", {filtered_count}건 오탐 필터링"
             progress_tracker.update(0.40, "analyze_events", msg)
         return result
 

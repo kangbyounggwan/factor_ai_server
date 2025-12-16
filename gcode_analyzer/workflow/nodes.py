@@ -129,11 +129,12 @@ async def comprehensive_summary_node(state: AnalysisState, progress_tracker=None
 
 
 # ============================================================
-# Node 3: 이벤트 추출 + 룰 엔진
+# Node 3: 이벤트 추출 + 룰 엔진 + Flash Lite 검증
 # ============================================================
-def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
+async def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
     """
     온도 이벤트 추출 및 룰/Rule 기반 분석
+    Rule Engine 이슈는 Flash Lite로 빠르게 검증
     """
     from ..rule_engine import run_all_rules, get_rule_summary, get_llm_review_needed
     
@@ -201,6 +202,52 @@ def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
         "timestamp": datetime.now().isoformat()
     })
     
+    # 규칙 엔진에서 확실한 이슈 (needs_llm_review=False, critical/high)를 수집
+    # 이 이슈들은 Flash Lite로 빠르게 검증 후 최종 결과에 포함됨
+    rule_candidate_issues = []
+    for r in rule_results:
+        if r.triggered and r.anomaly and not r.needs_llm_review:
+            if r.anomaly.severity in ["critical", "high"]:
+                rule_candidate_issues.append({
+                    "has_issue": True,
+                    "issue_type": r.anomaly.type.value,
+                    "severity": r.anomaly.severity,
+                    "description": r.anomaly.message,
+                    "impact": r.anomaly.context.get("impact", "출력 품질 저하 또는 실패 위험"),
+                    "suggestion": r.anomaly.context.get("fix", "수동 확인 필요"),
+                    "affected_lines": [r.anomaly.line_index],
+                    "event_line_index": r.anomaly.line_index,
+                    "layer": 0,
+                    "section": r.anomaly.context.get("section", "START"),
+                    "from_rule_engine": True,
+                    "rule_name": r.rule_name,
+                    "context": r.anomaly.context
+                })
+
+    # Rule Engine 이슈를 Flash Lite로 빠르게 검증 (오탐 필터링)
+    rule_confirmed_issues = rule_candidate_issues  # 기본값: 검증 없이 모두 포함
+    filtered_issues = []
+    validation_tokens = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    if rule_candidate_issues:
+        try:
+            from ..llm.rule_validator import validate_rule_issues
+            rule_confirmed_issues, filtered_issues, validation_tokens = await validate_rule_issues(
+                rule_candidate_issues,
+                parsed_lines,
+                context_lines=10
+            )
+            if filtered_issues:
+                timeline.append({
+                    "step": len(timeline) + 1,
+                    "label": f"LLM 검증: {len(filtered_issues)}건 오탐 필터링됨",
+                    "status": "done",
+                    "timestamp": datetime.now().isoformat()
+                })
+        except Exception as e:
+            # 검증 실패 시 안전하게 원본 유지
+            rule_confirmed_issues = rule_candidate_issues
+
     return {
         "temp_events": [e.dict() for e in temp_events],
         "temp_changes": temp_changes,  # 온도 변화 전체 (노즐/베드)
@@ -208,6 +255,9 @@ def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
                          "confidence": r.confidence,
                          "anomaly": r.anomaly.dict() if r.anomaly else None}
                         for r in rule_results],
+        "rule_confirmed_issues": rule_confirmed_issues,  # Flash Lite로 검증된 이슈
+        "rule_filtered_issues": filtered_issues,  # 오탐으로 필터링된 이슈
+        "validation_tokens": validation_tokens,  # 검증에 사용된 토큰
         "event_analysis_results": [r.dict() for r in analysis_results],
         "events_needing_llm": [r.dict() if hasattr(r, 'dict') else r for r in needs_llm],
         "normal_events": [r.dict() for r in normal_events],
@@ -240,9 +290,11 @@ async def llm_analyze_node(state: AnalysisState, progress_tracker=None) -> Dict[
     total_tokens = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     
     if not events_needing_llm:
+        # LLM 분석 필요 없어도 Rule Engine 확정 이슈는 포함해야 함
+        rule_confirmed_issues = state.get("rule_confirmed_issues", [])
         return {
             "llm_results": [],
-            "issues_found": [],
+            "issues_found": rule_confirmed_issues,  # Rule Engine 이슈 포함!
             "token_usage": total_tokens,
             "current_step": "llm_analyze",
             "progress": 0.60,
@@ -325,11 +377,25 @@ async def llm_analyze_node(state: AnalysisState, progress_tracker=None) -> Dict[
         total_tokens["output_tokens"] += tokens["output_tokens"]
         total_tokens["total_tokens"] += tokens["total_tokens"]
     
-    issues_found = [r for r in llm_results if r.get("has_issue", False)]
-    
+    # LLM에서 발견한 이슈
+    llm_issues = [r for r in llm_results if r.get("has_issue", False)]
+
+    # 규칙 엔진에서 이미 확정된 이슈 병합 (중복 제거)
+    rule_confirmed_issues = state.get("rule_confirmed_issues", [])
+    confirmed_lines = {issue["event_line_index"] for issue in rule_confirmed_issues}
+
+    # LLM 이슈 중 규칙 엔진과 중복되지 않는 것만 추가
+    unique_llm_issues = [
+        i for i in llm_issues
+        if i.get("event_line_index") not in confirmed_lines
+    ]
+
+    # 규칙 엔진 확정 이슈 + LLM 이슈 (규칙 엔진 이슈가 우선)
+    issues_found = rule_confirmed_issues + unique_llm_issues
+
     timeline[-1]["status"] = "done"
-    timeline[-1]["label"] = f"이슈 분석 완료 ({len(issues_found)}건 확정)"
-    
+    timeline[-1]["label"] = f"이슈 분석 완료 ({len(issues_found)}건 확정, 규칙: {len(rule_confirmed_issues)}건)"
+
     return {
         "llm_results": llm_results,
         "issues_found": issues_found,

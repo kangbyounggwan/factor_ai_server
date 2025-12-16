@@ -523,6 +523,180 @@ def rule_unexpected_temp_change_in_body(
 
 
 # ============================================================
+# [A0] 온도 대기(M109) 없이 압출 시작 감지
+# ============================================================
+
+def rule_missing_temp_wait(
+    lines: List[GCodeLine],
+    temp_events: List[TempEvent],
+    boundaries: SectionBoundaries
+) -> List[RuleResult]:
+    """
+    규칙 [A0]: M104 (온도 설정) 후 M109 (온도 대기) 없이 바로 압출 시작
+
+    문제: 노즐이 목표 온도에 도달하기 전에 압출 시작 → 필라멘트 미용융
+
+    정상 패턴:
+    - M104 S220 → ... → M109 S220 (대기) → G1 E+ (압출)
+
+    문제 패턴:
+    - M104 S220 → G1 E+ (압출) ← M109 없이 바로 압출!
+
+    예외 케이스:
+    - 이미 충분한 시간이 지남 (500줄 이상) → 온도 도달 가정
+    - H 파라미터 사용 (Bambu 확장)
+
+    Note: START/BODY 초반부 모두 체크 (일부 슬라이서는 온도 설정이 BODY로 분류됨)
+    """
+    results = []
+
+    # 노즐 온도 설정 추적
+    nozzle_temp_set = None  # {"line": int, "temp": float}
+    nozzle_temp_waited = False  # M109로 대기했는지
+
+    LINES_THRESHOLD = 500  # 이 줄 수 이상 지나면 온도 도달 가정
+    EARLY_BODY_LINES = 100  # BODY 초반 100줄까지 체크
+
+    for i, line in enumerate(lines):
+        section, _ = get_section_for_event(line.index, boundaries)
+
+        # START 또는 BODY 초반부에서만 체크
+        is_early_body = (section == GCodeSection.BODY and
+                         line.index <= boundaries.start_end + EARLY_BODY_LINES)
+
+        if section == GCodeSection.END:
+            break  # END 구간 도달 시 종료
+
+        # M104 S### (노즐 온도 설정, 대기 없음)
+        if line.cmd == "M104" and "S" in line.params:
+            temp = line.params["S"]
+            if temp > 0:
+                # 벤더 확장(H 파라미터) 체크
+                vendor_ext = _is_vendor_extended_temp_cmd(line)
+                if vendor_ext and vendor_ext.get("H", 0) > 0:
+                    continue  # H 파라미터 있으면 스킵
+
+                nozzle_temp_set = {
+                    "line_idx": i,
+                    "line_index": line.index,
+                    "temp": temp,
+                    "raw": line.raw
+                }
+                nozzle_temp_waited = False
+
+        # M109 S### (노즐 온도 대기)
+        if line.cmd == "M109" and "S" in line.params:
+            temp = line.params["S"]
+            if temp > 0:
+                nozzle_temp_waited = True
+
+        # G1 E+ (압출) - M109 없이 압출 시작했는지 체크
+        if line.cmd == "G1" and "E" in line.params:
+            e_val = line.params.get("E", 0)
+            if e_val > 0:
+                # 노즐 온도 설정했지만 M109로 대기하지 않음
+                if nozzle_temp_set and not nozzle_temp_waited:
+                    lines_since_temp = i - nozzle_temp_set["line_idx"]
+
+                    # 50줄 이내에 압출 시작 → 치명적
+                    if lines_since_temp <= 50:
+                        results.append(RuleResult(
+                            rule_name="missing_temp_wait",
+                            triggered=True,
+                            anomaly=Anomaly(
+                                type=AnomalyType.COLD_EXTRUSION,
+                                line_index=nozzle_temp_set["line_index"],
+                                severity="critical",
+                                message=f"[치명적] 온도 대기(M109) 없이 압출 시작 - 노즐이 {nozzle_temp_set['temp']}°C에 도달하기 전에 압출됨",
+                                context={
+                                    "temp_set_line": nozzle_temp_set["line_index"],
+                                    "temp_value": nozzle_temp_set["temp"],
+                                    "first_extrusion_line": line.index,
+                                    "lines_between": lines_since_temp,
+                                    "issue_type": "missing_m109",
+                                    "fix": f"M104 S{int(nozzle_temp_set['temp'])} 명령 뒤에 M109 S{int(nozzle_temp_set['temp'])} 추가 필요"
+                                }
+                            ),
+                            confidence=0.95,
+                            needs_llm_review=False
+                        ))
+                        return results  # 하나만 보고
+
+                    # 이미 충분한 줄 수가 지났으면 더 이상 체크 불필요
+                    if lines_since_temp > LINES_THRESHOLD:
+                        return results
+
+    return results
+
+
+# ============================================================
+# [A0-B] 베드 온도 미설정 감지
+# ============================================================
+
+def rule_missing_bed_temp(
+    lines: List[GCodeLine],
+    temp_events: List[TempEvent],
+    boundaries: SectionBoundaries
+) -> List[RuleResult]:
+    """
+    규칙 [A0-B]: 베드 온도가 전혀 설정되지 않음
+
+    문제: 첫 레이어 접착 실패 위험
+
+    체크 방식:
+    - START 구간에서 M140 또는 M190 명령이 없음
+    - 단, 베드 없는 프린터(델타 등)는 정상
+    """
+    results = []
+
+    has_bed_temp = False
+    first_extrusion_line = None
+
+    for i, line in enumerate(lines):
+        section, _ = get_section_for_event(line.index, boundaries)
+
+        # START에서 베드 온도 명령 체크
+        if section == GCodeSection.START:
+            if line.cmd in ["M140", "M190"] and "S" in line.params:
+                temp = line.params["S"]
+                if temp > 0:
+                    has_bed_temp = True
+
+        # BODY 진입 시 첫 압출 라인 기록
+        if section == GCodeSection.BODY and first_extrusion_line is None:
+            if line.cmd == "G1" and "E" in line.params:
+                e_val = line.params.get("E", 0)
+                if e_val > 0:
+                    first_extrusion_line = line.index
+
+        # END 구간 도달 시 체크 종료
+        if section == GCodeSection.END:
+            break
+
+    # 베드 온도 설정 없이 압출 시작
+    if not has_bed_temp and first_extrusion_line:
+        results.append(RuleResult(
+            rule_name="missing_bed_temp",
+            triggered=True,
+            anomaly=Anomaly(
+                type=AnomalyType.MISSING_BED_TEMP,  # 올바른 타입
+                line_index=first_extrusion_line,
+                severity="high",
+                message="[경고] 베드 온도가 설정되지 않음 - 첫 레이어 접착 실패 위험",
+                context={
+                    "first_extrusion_line": first_extrusion_line,
+                    "issue_type": "missing_bed_temp",
+                    "fix": "START 구간에 M140 S60 (또는 M190 S60) 추가 권장"
+                }
+            ),
+            confidence=0.90,
+            needs_llm_review=False  # 명확한 이슈, LLM 검토 불필요
+        ))
+
+    return results
+
+
+# ============================================================
 # [A1] 히터 끄기 후 익스트루전 감지 (END 코드 잘못 삽입)
 # ============================================================
 
@@ -765,7 +939,7 @@ def rule_excessive_print_speed(
                 }
             ),
             confidence=0.85,
-            needs_llm_review=True
+            needs_llm_review=False  # 속도 이슈는 온도 LLM에 보내지 않음
         ))
     elif excessive_count > 10:  # 빠른 속도가 자주 나타나면
         results.append(RuleResult(
@@ -783,7 +957,7 @@ def rule_excessive_print_speed(
                 }
             ),
             confidence=0.7,
-            needs_llm_review=True
+            needs_llm_review=False  # 속도 이슈는 온도 LLM에 보내지 않음
         ))
 
     return results
@@ -846,7 +1020,7 @@ def rule_too_slow_print_speed(
                 }
             ),
             confidence=0.6,
-            needs_llm_review=True
+            needs_llm_review=False  # 속도 이슈는 온도 LLM에 보내지 않음
         ))
 
     return results
@@ -962,7 +1136,7 @@ def rule_rapid_speed_change(
                 }
             ),
             confidence=0.75,
-            needs_llm_review=True
+            needs_llm_review=False  # 속도 이슈는 온도 LLM에 보내지 않음
         ))
 
     return results
@@ -974,7 +1148,9 @@ def rule_rapid_speed_change(
 
 # 활성화된 규칙 목록 (새 규칙 추가 시 여기에 등록)
 RULES: List[RuleFunction] = [
-    # 온도 관련 (핵심)
+    # 온도 관련 (핵심) - 우선순위 순
+    rule_missing_temp_wait,           # [A0] M109 없이 압출 시작 (critical)
+    rule_missing_bed_temp,            # [A0-B] 베드 온도 미설정 (high)
     rule_extrusion_after_heater_off,  # [A1] 히터 끄기 후 익스트루전 (critical)
     rule_early_temp_off,
     rule_cold_extrusion,

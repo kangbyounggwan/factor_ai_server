@@ -38,6 +38,8 @@ class AnomalyType(str, Enum):
     RAPID_TEMP_CHANGE = "rapid_temp_change"
     LOW_TEMP = "low_temp"
     BED_TEMP_OFF_EARLY = "bed_temp_off_early"
+    MISSING_BED_TEMP = "missing_bed_temp"        # 베드 온도 미설정
+    MISSING_TEMP_WAIT = "missing_temp_wait"      # M109 없이 압출 시작
     # 속도 관련
     EXCESSIVE_SPEED = "excessive_speed"          # 과도한 속도
     INCONSISTENT_SPEED = "inconsistent_speed"    # 일관성 없는 속도 변화
