@@ -18,6 +18,7 @@ from gcode_analyzer.rate_limiter import (
     get_rate_limiter,
     RateLimitError,
 )
+from gcode_analyzer.models import DeltaExportRequest, LineDelta, DeltaAction
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -783,8 +784,8 @@ async def run_gcode_analysis_task(analysis_id: str):
 
         logger.info(f"[GCode] Analysis completed: {analysis_id}")
 
-        # 임시 G-code 파일만 삭제 (상태 파일은 클라이언트가 조회할 수 있도록 유지)
-        _cleanup_temp_gcode_file(data.get("temp_file"))
+        # 임시 G-code 파일 유지 (export 기능에서 원본 필요)
+        # 파일 정리는 cleanup_old_analyses()에서 일괄 처리
 
     except Exception as e:
         import traceback
@@ -820,16 +821,19 @@ async def apply_gcode_patches_task(analysis_id: str, selected_patches: Optional[
         if selected_patches is not None:
             patches_data = [p for i, p in enumerate(patches_data) if i in selected_patches]
 
-        # PatchPlan 복원
+        # PatchPlan 복원 (모든 필드 포함)
         patches = [
             PatchSuggestion(
-                line_index=p["line_index"],
-                original_line=p["original_line"],
-                action=p["action"],
-                new_line=p.get("new_line"),
-                reason=p["reason"],
+                line_index=p.get("line_index") or p.get("line", 0),
+                original_line=p.get("original_line") or p.get("original", ""),
+                action=p.get("action", "review"),
+                new_line=p.get("new_line") or p.get("modified"),
+                reason=p.get("reason", ""),
                 priority=i,
-                issue_type=p["issue_type"]
+                issue_type=p.get("issue_type", "unknown"),
+                autofix_allowed=p.get("autofix_allowed", True),
+                position=p.get("position"),
+                vendor_extension=p.get("vendor_extension")
             )
             for i, p in enumerate(patches_data)
         ]
@@ -1140,4 +1144,208 @@ async def get_gcode_segments(analysis_id: str):
         "analysis_id": analysis_id,
         "status": data.get("status", "unknown"),
         "segments": segments
+    }
+
+
+# ============================================================
+# Delta-based G-code Export API
+# 델타 기반 G-code 내보내기 API
+# ============================================================
+
+@router.post("/export")
+async def export_gcode_with_deltas(request: DeltaExportRequest):
+    """
+    델타를 적용하여 수정된 G-code 스트리밍 다운로드
+
+    클라이언트에서 수정한 델타(변경사항)만 전송하면
+    서버에서 원본 G-code와 병합하여 스트리밍 응답
+
+    **메모리 효율적**: 50만 줄 G-code도 전체를 메모리에 올리지 않고 처리
+
+    **델타 액션 유형**:
+    - `modify`: 해당 라인 내용 변경
+    - `delete`: 해당 라인 삭제
+    - `insert_before`: 해당 라인 앞에 삽입
+    - `insert_after`: 해당 라인 뒤에 삽입
+
+    **요청 예시**:
+    ```json
+    {
+        "analysis_id": "abc123",
+        "deltas": [
+            {"line_index": 42, "action": "modify", "new_content": "M109 S220"},
+            {"line_index": 100, "action": "delete"},
+            {"line_index": 50, "action": "insert_after", "new_content": "M190 S65"}
+        ],
+        "filename": "my_model_modified.gcode"
+    }
+    ```
+    """
+    from gcode_analyzer.delta_merger import (
+        merge_deltas_streaming,
+        generate_header_comment,
+        stream_from_file,
+        stream_from_string,
+        DeltaMergeResult
+    )
+
+    # 1. 분석 데이터 조회
+    data = get_analysis(request.analysis_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="분석 결과를 찾을 수 없습니다")
+
+    # 2. 원본 G-code 소스 확인
+    original_source = data.get("temp_file") or data.get("original_gcode_url")
+    original_content = data.get("gcode_content")  # 인메모리 저장된 경우
+
+    if not original_source and not original_content:
+        raise HTTPException(
+            status_code=404,
+            detail="원본 G-code를 찾을 수 없습니다. 분석이 만료되었거나 파일이 삭제되었을 수 있습니다."
+        )
+
+    # 3. 파일명 결정
+    original_filename = data.get("file_name", "gcode")
+    if request.filename:
+        output_filename = request.filename
+    else:
+        base_name = os.path.splitext(original_filename)[0]
+        output_filename = f"{base_name}_modified.gcode"
+
+    # 4. 델타 변환 (Pydantic 모델 → 내부 모델)
+    deltas = []
+    for d in request.deltas:
+        if isinstance(d, dict):
+            deltas.append(LineDelta(**d))
+        else:
+            deltas.append(d)
+
+    # 5. 결과 통계 객체
+    result = DeltaMergeResult()
+
+    # 6. 스트리밍 생성기
+    def generate():
+        nonlocal result
+
+        # 헤더 주석 (선택적)
+        if request.include_header_comment:
+            yield from generate_header_comment(deltas, original_filename)
+
+        # 원본 소스에서 스트리밍 로드
+        if original_content:
+            # 인메모리 콘텐츠
+            lines_iter = stream_from_string(original_content)
+        elif original_source and os.path.exists(original_source):
+            # 로컬 파일
+            lines_iter = stream_from_file(original_source)
+        else:
+            # URL (Supabase Storage 등) - 동기 방식으로 처리
+            # 주의: 비동기 스트리밍은 StreamingResponse와 호환성 문제가 있을 수 있음
+            raise HTTPException(
+                status_code=404,
+                detail="원본 파일을 찾을 수 없습니다."
+            )
+
+        # 델타 병합하며 출력
+        yield from merge_deltas_streaming(lines_iter, deltas, result)
+
+        # 로그 기록
+        logger.info(
+            f"[GCode Export] {request.analysis_id}: "
+            f"applied={result.applied_deltas}, "
+            f"skipped={result.skipped_deltas}, "
+            f"total_lines={result.total_lines}"
+        )
+
+    # 7. 스트리밍 응답
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{output_filename}"',
+            "X-Applied-Deltas": str(len(request.deltas)),
+            "X-Original-Filename": original_filename,
+            "Cache-Control": "no-cache"
+        }
+    )
+
+
+@router.post("/export/preview")
+async def preview_gcode_export(request: DeltaExportRequest):
+    """
+    델타 적용 미리보기 (전체 파일 생성 없이 통계만 반환)
+
+    실제 다운로드 전에 적용될 변경사항을 확인할 수 있습니다.
+
+    **응답 예시**:
+    ```json
+    {
+        "analysis_id": "abc123",
+        "original_filename": "model.gcode",
+        "output_filename": "model_modified.gcode",
+        "delta_summary": {
+            "total": 5,
+            "modify": 2,
+            "delete": 1,
+            "insert_before": 1,
+            "insert_after": 1
+        },
+        "warnings": []
+    }
+    ```
+    """
+    from gcode_analyzer.delta_merger import validate_deltas
+
+    # 1. 분석 데이터 조회
+    data = get_analysis(request.analysis_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="분석 결과를 찾을 수 없습니다")
+
+    # 2. 원본 파일 정보
+    original_filename = data.get("file_name", "gcode")
+    total_lines = data.get("total_lines", 0)
+
+    # result에서 total_lines 가져오기 시도
+    if total_lines == 0:
+        result_data = data.get("result", {})
+        comprehensive_summary = result_data.get("comprehensive_summary", {})
+        total_lines = comprehensive_summary.get("total_lines", 0)
+
+    # 3. 파일명 결정
+    if request.filename:
+        output_filename = request.filename
+    else:
+        base_name = os.path.splitext(original_filename)[0]
+        output_filename = f"{base_name}_modified.gcode"
+
+    # 4. 델타 통계
+    deltas = request.deltas
+    delta_summary = {
+        "total": len(deltas),
+        "modify": sum(1 for d in deltas if d.action in [DeltaAction.MODIFY, "modify"]),
+        "delete": sum(1 for d in deltas if d.action in [DeltaAction.DELETE, "delete"]),
+        "insert_before": sum(1 for d in deltas if d.action in [DeltaAction.INSERT_BEFORE, "insert_before"]),
+        "insert_after": sum(1 for d in deltas if d.action in [DeltaAction.INSERT_AFTER, "insert_after"])
+    }
+
+    # 5. 델타 변환 및 유효성 검증
+    delta_objects = []
+    for d in deltas:
+        if isinstance(d, dict):
+            delta_objects.append(LineDelta(**d))
+        else:
+            delta_objects.append(d)
+
+    warnings = []
+    if total_lines > 0:
+        warnings = validate_deltas(delta_objects, total_lines)
+
+    return {
+        "analysis_id": request.analysis_id,
+        "original_filename": original_filename,
+        "output_filename": output_filename,
+        "total_lines": total_lines,
+        "delta_summary": delta_summary,
+        "warnings": warnings,
+        "ready_to_export": len(warnings) == 0
     }

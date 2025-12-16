@@ -22,6 +22,17 @@ EXPERT_ASSESSMENT_PROMPT = ChatPromptTemplate.from_template("""
 3. **명확성**: 사용자가 바로 이해하고 조치할 수 있는 구체적인 조언을 제공하세요.
 4. **정확성**: 이슈 라인 번호(`line`)는 입력된 `issues_json`의 `line` 값을 그대로 사용해야 합니다. 절대 변경하지 마세요.
 
+## ⚠️ 중요: 이슈 생성 금지!
+**`critical_issues`는 반드시 `issues_json`에 제공된 이슈만 포함해야 합니다.**
+- `issues_json`이 빈 배열(`[]`)이면 → `critical_issues`도 빈 배열(`[]`)이어야 함
+- `summary_info`만 보고 새로운 이슈를 만들어내지 마세요!
+- 라인 번호를 직접 추측하거나 발명하지 마세요!
+- 입력된 이슈가 없으면 → 품질 점수는 90~100점 (S등급)
+
+**예시:**
+- `issues_json: []` → `critical_issues: []`, `quality_score: 95`, `quality_grade: "S"`
+- `summary_info`의 통계만으로 이슈를 추론하지 마세요. 1차 분석에서 이미 필터링되었습니다.
+
 ## ⚠️ 치명적 이슈 자동 분류 (반드시 준수!)
 다음 조건에 해당하면 무조건 severity: "critical" 또는 "high"로 분류하고, 점수를 F (0~39)로 부여하세요:
 

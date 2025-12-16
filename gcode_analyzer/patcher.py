@@ -38,6 +38,7 @@ class PatchSuggestion:
     issue_type: str
     vendor_extension: Optional[Dict[str, Any]] = None  # 벤더 확장 정보
     autofix_allowed: bool = True  # 자동 패치 허용 여부
+    position: Optional[str] = None  # "before", "after", "replace" - add/modify 시 위치
 
 @dataclass
 class PatchPlan:
@@ -116,6 +117,256 @@ def _is_temperature_command(line: str) -> bool:
     return any(cmd in line.upper() for cmd in temp_cmds)
 
 
+def _check_nearby_temp_commands(
+    lines: List[GCodeLine],
+    line_index: int,
+    window: int = 20
+) -> Dict[str, Any]:
+    """
+    주변 라인에서 온도 관련 명령어 확인
+    Bambu H 파라미터도 고려하여 실제 온도값 추출
+
+    [C1] 팬 명령(M106/M107) 근처 감지 추가
+    - 팬 명령 근처에서 M190 제안 스킵용
+
+    Args:
+        lines: 파싱된 G-code 라인들
+        line_index: 대상 라인 번호 (1-based)
+        window: 확인할 범위 (앞뒤로)
+
+    Returns:
+        {
+            "has_m109_before": bool,  # 앞에 M109가 있는지
+            "has_m109_after": bool,   # 뒤에 M109가 있는지
+            "has_m190_before": bool,  # 앞에 M190이 있는지
+            "has_m190_after": bool,   # 뒤에 M190이 있는지
+            "nearest_m109": int or None,  # 가장 가까운 M109 라인 번호
+            "nearest_m190": int or None,  # 가장 가까운 M190 라인 번호
+            "m109_temp": int or None,     # M109 실제 온도값 (H 파라미터 우선)
+            "m190_temp": int or None,     # M190 온도값
+            "has_vendor_extension": bool, # 벤더 확장(H 파라미터) 있는지
+            "has_fan_nearby": bool,       # [C1] 팬 명령(M106/M107)이 근처에 있는지
+            "nearest_fan_line": int or None,  # 가장 가까운 팬 명령 라인
+        }
+    """
+    idx_0 = line_index - 1
+    start = max(0, idx_0 - window)
+    end = min(len(lines), idx_0 + window + 1)
+
+    result = {
+        "has_m109_before": False,
+        "has_m109_after": False,
+        "has_m190_before": False,
+        "has_m190_after": False,
+        "nearest_m109": None,
+        "nearest_m190": None,
+        "m109_temp": None,
+        "m190_temp": None,
+        "has_vendor_extension": False,
+        # [C1] 팬 명령 감지
+        "has_fan_nearby": False,
+        "nearest_fan_line": None,
+    }
+
+    def _extract_actual_temp(raw: str) -> int:
+        """S값 또는 H값(Bambu 확장) 중 실제 온도 추출"""
+        # H 파라미터가 있으면 그것이 실제 온도 (Bambu/Orca)
+        h_match = re.search(r'\bH(\d+)', raw, re.IGNORECASE)
+        if h_match:
+            return int(h_match.group(1))
+        # 없으면 S 값 사용
+        s_match = re.search(r'S(\d+)', raw)
+        if s_match:
+            return int(s_match.group(1))
+        return 0
+
+    # 앞쪽 검색 (역순)
+    for i in range(idx_0 - 1, start - 1, -1):
+        if i < 0 or i >= len(lines):
+            continue
+        raw = lines[i].raw.upper() if lines[i].raw else ""
+        cmd = lines[i].cmd
+
+        if "M109" in raw and not result["has_m109_before"]:
+            result["has_m109_before"] = True
+            result["nearest_m109"] = i + 1
+            result["m109_temp"] = _extract_actual_temp(raw)
+            # H 파라미터 존재 확인
+            if re.search(r'\bH\d+', raw, re.IGNORECASE):
+                result["has_vendor_extension"] = True
+
+        if "M190" in raw and not result["has_m190_before"]:
+            result["has_m190_before"] = True
+            result["nearest_m190"] = i + 1
+            result["m190_temp"] = _extract_actual_temp(raw)
+
+        # [C1] 팬 명령 감지 (M106 = 팬 ON, M107 = 팬 OFF)
+        if cmd in ["M106", "M107"] and not result["has_fan_nearby"]:
+            result["has_fan_nearby"] = True
+            result["nearest_fan_line"] = i + 1
+
+    # 뒤쪽 검색
+    for i in range(idx_0 + 1, end):
+        if i >= len(lines):
+            continue
+        raw = lines[i].raw.upper() if lines[i].raw else ""
+        cmd = lines[i].cmd
+
+        if "M109" in raw and not result["has_m109_after"]:
+            result["has_m109_after"] = True
+            if result["nearest_m109"] is None:
+                result["nearest_m109"] = i + 1
+                result["m109_temp"] = _extract_actual_temp(raw)
+                if re.search(r'\bH\d+', raw, re.IGNORECASE):
+                    result["has_vendor_extension"] = True
+
+        if "M190" in raw and not result["has_m190_after"]:
+            result["has_m190_after"] = True
+            if result["nearest_m190"] is None:
+                result["nearest_m190"] = i + 1
+                result["m190_temp"] = _extract_actual_temp(raw)
+
+        # [C1] 팬 명령 감지
+        if cmd in ["M106", "M107"] and not result["has_fan_nearby"]:
+            result["has_fan_nearby"] = True
+            if result["nearest_fan_line"] is None:
+                result["nearest_fan_line"] = i + 1
+
+    return result
+
+
+def _generate_fix_code(
+    issue_type: str,
+    original_line: str,
+    filament_type: str = "PLA",
+    context: Optional[Dict[str, Any]] = None
+) -> tuple[str, str, str]:
+    """
+    이슈 타입과 원본 라인을 기반으로 수정 코드 자동 생성
+    주변 코드 컨텍스트를 확인하여 중복 명령을 방지
+
+    Args:
+        issue_type: 이슈 유형
+        original_line: 원본 G-code 라인
+        filament_type: 필라멘트 타입 (PLA, ABS, PETG 등)
+        context: 주변 코드 컨텍스트 (_check_nearby_temp_commands 결과)
+
+    Returns:
+        (action, new_line, position) - action: add/modify/delete,
+                                       new_line: 추가/수정할 코드,
+                                       position: before/after/replace
+    """
+    # 필라멘트별 권장 온도
+    FILAMENT_TEMPS = {
+        "PLA": {"nozzle": 200, "bed": 60},
+        "ABS": {"nozzle": 240, "bed": 100},
+        "PETG": {"nozzle": 230, "bed": 70},
+        "TPU": {"nozzle": 220, "bed": 50},
+    }
+    temps = FILAMENT_TEMPS.get(filament_type.upper() if filament_type else "PLA", FILAMENT_TEMPS["PLA"])
+    nozzle_temp = temps["nozzle"]
+    bed_temp = temps["bed"]
+
+    # original_line이 None이면 빈 문자열로 처리
+    if original_line is None:
+        original_line = ""
+
+    # 원본에서 온도값 추출
+    s_match = re.search(r'S(\d+)', original_line)
+    original_temp = int(s_match.group(1)) if s_match else 0
+
+    # 컨텍스트 기본값
+    if context is None:
+        context = {}
+
+    # 이슈 타입별 수정 코드 생성
+    if issue_type in ["temp_no_wait", "nozzle_temp_no_wait"]:
+        # M104 뒤에 M109 대기 명령 추가 (M104는 유지)
+        # M104 = 가열 시작 (비대기), M109 = 온도 도달까지 대기
+        if "M104" in original_line.upper():
+            # 주변에 이미 M109가 있는지 확인
+            if context.get("has_m109_before") or context.get("has_m109_after"):
+                # 이미 M109가 있으면 검토 필요로 표시
+                return ("review", None, None)
+
+            # M104의 온도값을 사용하여 M109 추가
+            target_temp = original_temp if original_temp >= 180 else nozzle_temp
+            # M104 유지 + M109 추가 (add, after)
+            return ("add", f"M109 S{target_temp}", "after")
+        else:
+            # 주변에 이미 M109가 있으면 추가 불필요
+            if context.get("has_m109_before") or context.get("has_m109_after"):
+                return ("review", None, None)
+            return ("add", f"M109 S{nozzle_temp}", "after")
+
+    elif issue_type in ["bed_temp_no_wait", "bed_temp_sequence"]:
+        # M140 후 M190 추가
+        # 주변에 이미 M190이 있으면 추가 불필요
+        if context.get("has_m190_before") or context.get("has_m190_after"):
+            return ("review", None, None)
+
+        # [C1] 팬 명령(M106/M107) 근처에서 M190 제안 스킵
+        # 팬 ON/OFF 근처에서 베드 대기는 의미 없음
+        if context.get("has_fan_nearby"):
+            return ("review", None, None)
+
+        if "M140" in original_line.upper():
+            target_temp = original_temp if original_temp > 0 else bed_temp
+            return ("add", f"M190 S{target_temp}", "after")
+        else:
+            return ("add", f"M190 S{bed_temp}", "after")
+
+    elif issue_type in ["excessive_temp", "overtemp"]:
+        # 과도한 온도 → 권장 온도로 수정
+        if "M104" in original_line.upper() or "M109" in original_line.upper():
+            cmd = "M109" if "M109" in original_line.upper() else "M104"
+            return ("modify", f"{cmd} S{nozzle_temp}", "replace")
+        elif "M140" in original_line.upper() or "M190" in original_line.upper():
+            cmd = "M190" if "M190" in original_line.upper() else "M140"
+            return ("modify", f"{cmd} S{bed_temp}", "replace")
+
+    elif issue_type in ["low_temp", "cold_extrusion"]:
+        # 낮은 온도 → 권장 온도로 수정
+        # 주변에 이미 적절한 M109가 있는지 확인
+        if context.get("has_m109_before"):
+            m109_temp = context.get("m109_temp", 0)
+            # 벤더 확장(H 파라미터)이 있으면 예열 시퀀스일 가능성 → 검토 필요
+            if context.get("has_vendor_extension"):
+                return ("review", None, None)
+            if m109_temp and m109_temp >= 140:  # 예열 온도(140°C 이상)도 고려
+                # 이미 예열 M109가 있으면 검토 필요
+                return ("review", None, None)
+
+        if "M104" in original_line.upper():
+            return ("modify", f"M109 S{nozzle_temp}", "replace")
+        elif "M109" in original_line.upper():
+            return ("modify", f"M109 S{nozzle_temp}", "replace")
+        else:
+            # 주변에 이미 M109가 있으면 추가 불필요
+            if context.get("has_m109_before") or context.get("has_m109_after"):
+                return ("review", None, None)
+            return ("add", f"M109 S{nozzle_temp}", "before")
+
+    elif issue_type in ["extrusion_before_temp"]:
+        # 압출 전 온도 대기 추가
+        # 주변에 이미 M109가 있으면 추가 불필요
+        if context.get("has_m109_before"):
+            m109_temp = context.get("m109_temp", 0)
+            if m109_temp and m109_temp >= 150:
+                return ("review", None, None)
+        return ("add", f"M109 S{nozzle_temp}", "before")
+
+    elif issue_type in ["temp_drop"]:
+        # 온도 하락 → 온도 복구 명령 추가
+        # 주변에 이미 M109가 있으면 검토 필요
+        if context.get("has_m109_before") or context.get("has_m109_after"):
+            return ("review", None, None)
+        return ("add", f"M109 S{nozzle_temp}", "before")
+
+    # 기본: 수정 불가
+    return ("review", None, None)
+
+
 def identify_vendor_from_gcode(lines: List[GCodeLine]) -> Dict[str, Any]:
     """
     G-code 파일에서 벤더/슬라이서 정보 식별
@@ -180,7 +431,8 @@ def generate_patch_plan(
     issues: List[Dict[str, Any]],
     lines: List[GCodeLine],
     file_path: str,
-    slicer_type: Optional[SlicerType] = None
+    slicer_type: Optional[SlicerType] = None,
+    filament_type: str = "PLA"
 ) -> PatchPlan:
     """
     발견된 문제들에 대한 패치 계획 생성
@@ -190,6 +442,7 @@ def generate_patch_plan(
         lines: 파싱된 G-code 라인들
         file_path: 파일 경로
         slicer_type: 슬라이서 타입 (SlicerType enum)
+        filament_type: 필라멘트 타입 (PLA, ABS, PETG 등)
     """
     patches = []
 
@@ -199,10 +452,10 @@ def generate_patch_plan(
         detected_slicer, _ = SlicerDetector.detect(lines)
 
     for issue in issues:
-        line_index = issue.get("line_index") or 0
-        issue_type = issue.get("issue_type") or "unknown"
+        line_index = issue.get("line_index") or issue.get("line") or 0
+        issue_type = issue.get("issue_type") or issue.get("type") or "unknown"
         fix_gcode = issue.get("fix_gcode")
-        fix_action = issue.get("fix_action") or ""
+        fix_action = issue.get("fix_action") or issue.get("fix_proposal") or ""
         priority = issue.get("priority") or 99
 
         # 원본 라인 찾기
@@ -215,40 +468,48 @@ def generate_patch_plan(
         autofix_allowed = True
         action = "review"
         new_line = None
+        position = None  # before, after, replace
 
         # Bambu 벤더 확장이 있는 온도 명령 → 자동 패치 금지, 검토 필요로 전환
         if vendor_extension and _is_temperature_command(original_line):
             # 온도 관련 이슈인데 H 파라미터가 있으면 → 검토 필요
             if issue_type in ["temperature_error", "temp_error", "dangerous_temp",
-                             "cold_extrusion", "overtemp"]:
+                             "cold_extrusion", "overtemp", "temp_no_wait", "low_temp",
+                             "excessive_temp", "vendor_extension"]:
                 autofix_allowed = False
                 action = "review"
                 new_line = None
                 # 이유에 벤더 확장 정보 추가 (confidence 포함)
                 confidence = vendor_extension.get("confidence", "unknown")
-                vendor_note = f" [{vendor_extension.get('vendor', 'unknown').upper()} 벤더 확장 감지: H={vendor_extension.get('H', '?')}, 신뢰도={confidence}]"
+                vendor_note = f" [BAMBU 벤더 확장 감지: H={vendor_extension.get('H', '?')}, 신뢰도={confidence}]"
                 fix_action = (fix_action or issue.get("description", "")) + vendor_note
 
         # 패치 액션 결정 (벤더 확장으로 인한 review가 아닌 경우)
         if autofix_allowed:
             if fix_gcode and fix_gcode.lower() not in ["null", "none", ""]:
-                # 수정 제안이 있음
+                # 명시적 수정 코드가 있음
                 if "제거" in fix_action or "삭제" in fix_action:
                     action = "delete"
                     new_line = None
                 else:
                     action = "modify"
                     new_line = fix_gcode.split("\n")[0] if fix_gcode else None
-            elif "제거" in fix_action or "삭제" in fix_action:
-                action = "delete"
-                new_line = None
-            elif "추가" in fix_action or "삽입" in fix_action:
-                action = "add"
-                new_line = fix_gcode.split("\n")[0] if fix_gcode else None
+                    position = "replace"
             else:
-                # 기본: 수정 필요하지만 구체적 코드 없음
-                action = "review"
-                new_line = None
+                # fix_gcode가 없으면 자동 생성
+                # 주변 코드 컨텍스트 확인 (중복 명령 방지)
+                context = _check_nearby_temp_commands(lines, line_index, window=20)
+                auto_action, auto_code, auto_position = _generate_fix_code(
+                    issue_type, original_line, filament_type, context
+                )
+                action = auto_action
+                new_line = auto_code
+                position = auto_position
+
+                # 자동 생성된 코드가 없으면 review
+                if not new_line:
+                    action = "review"
+                    autofix_allowed = False
 
         patches.append(PatchSuggestion(
             line_index=line_index,
@@ -259,7 +520,8 @@ def generate_patch_plan(
             priority=priority,
             issue_type=issue_type,
             vendor_extension=vendor_extension,
-            autofix_allowed=autofix_allowed
+            autofix_allowed=autofix_allowed,
+            position=position
         ))
 
     # 우선순위로 정렬

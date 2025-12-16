@@ -1,9 +1,15 @@
 """
 G-code 구간 분류기
 START_GCODE / BODY / END_GCODE 구간을 자동 감지
+
+[B1] 강화된 섹션 감지:
+- END 마커 정확도 향상
+- 마지막 레이어 추적
+- 다양한 슬라이서 포맷 지원
 """
 from typing import List, Tuple
 from enum import Enum
+import re
 from .models import GCodeLine
 
 class GCodeSection(str, Enum):
@@ -17,12 +23,18 @@ class SectionBoundaries:
         self,
         start_end: int,      # START 끝나는 라인 (1-based)
         body_end: int,       # BODY 끝나는 라인 (1-based)
-        total_lines: int
+        total_lines: int,
+        last_layer: int = 0,           # 마지막 레이어 번호
+        last_layer_line: int = 0,      # 마지막 레이어 시작 라인
+        last_extrusion_line: int = 0   # 마지막 익스트루전 라인
     ):
         self.start_end = start_end
         self.body_end = body_end
         self.total_lines = total_lines
-    
+        self.last_layer = last_layer
+        self.last_layer_line = last_layer_line
+        self.last_extrusion_line = last_extrusion_line
+
     def get_section(self, line_index: int) -> GCodeSection:
         """라인 번호로 구간 반환"""
         if line_index <= self.start_end:
@@ -31,100 +43,229 @@ class SectionBoundaries:
             return GCodeSection.BODY
         else:
             return GCodeSection.END
-    
+
+    def is_near_end(self, line_index: int, threshold: int = 50) -> bool:
+        """END 구간 근처인지 확인 (오탐 방지용)"""
+        return line_index > self.body_end - threshold
+
     def __repr__(self):
-        return f"SectionBoundaries(START: 1-{self.start_end}, BODY: {self.start_end+1}-{self.body_end}, END: {self.body_end+1}-{self.total_lines})"
+        return (f"SectionBoundaries(START: 1-{self.start_end}, "
+                f"BODY: {self.start_end+1}-{self.body_end}, "
+                f"END: {self.body_end+1}-{self.total_lines}, "
+                f"last_layer={self.last_layer})")
+
+
+def _find_last_layer_info(lines: List[GCodeLine]) -> Tuple[int, int, int]:
+    """
+    마지막 레이어 정보 찾기
+
+    Returns:
+        (last_layer_num, last_layer_line, last_extrusion_line)
+    """
+    last_layer_num = 0
+    last_layer_line = 0
+    last_extrusion_line = 0
+
+    # 레이어 패턴들 (다양한 슬라이서 지원)
+    # Cura: ;LAYER:123
+    # PrusaSlicer: ;LAYER_CHANGE, ; Z = 12.34
+    # BambuStudio/OrcaSlicer: ; CHANGE_LAYER, ;LAYER:123
+    layer_patterns = [
+        re.compile(r';LAYER[:\s]*(\d+)', re.IGNORECASE),
+        re.compile(r';\s*LAYER_CHANGE', re.IGNORECASE),
+        re.compile(r';\s*CHANGE_LAYER', re.IGNORECASE),
+    ]
+
+    for i, line in enumerate(lines):
+        # 레이어 번호 추출
+        if line.comment:
+            for pattern in layer_patterns:
+                match = pattern.search(f";{line.comment}")
+                if match:
+                    if match.groups():
+                        try:
+                            layer_num = int(match.group(1))
+                            if layer_num > last_layer_num:
+                                last_layer_num = layer_num
+                                last_layer_line = i
+                        except ValueError:
+                            pass
+                    break
+
+        # 마지막 익스트루전 라인 추적
+        if line.cmd in ["G0", "G1"] and "E" in line.params:
+            e_val = line.params.get("E", 0)
+            if e_val > 0:  # 양의 익스트루전만
+                last_extrusion_line = i
+
+    return last_layer_num, last_layer_line, last_extrusion_line
+
 
 def detect_sections(lines: List[GCodeLine]) -> SectionBoundaries:
     """
-    G-code에서 구간 경계를 자동 감지
-    
+    G-code에서 구간 경계를 자동 감지 (강화된 버전)
+
     감지 기준:
     - START 끝: 첫 번째 ;LAYER:0 또는 ;TYPE: 주석 발견
-    - BODY 끝: 마지막 레이어 이후, M84/M106 S0/G28 등 종료 명령 시작점
+    - BODY 끝: END 마커 또는 마지막 레이어 이후 온도 끄기 명령
+
+    [B1] 강화된 END 감지:
+    1. 명시적 END 코멘트 (;END, ;END_GCODE, ; end gcode 등)
+    2. 마지막 레이어 이후 M104 S0 / M140 S0
+    3. 마지막 익스트루전 이후 온도 끄기 명령
+    4. G28 / M84 종료 명령
     """
     total_lines = len(lines)
     if total_lines == 0:
         return SectionBoundaries(0, 0, 0)
-    
+
     # 기본값: 전체가 BODY
     start_end = 0
     body_end = total_lines
-    
+
+    # 마지막 레이어 정보 먼저 수집
+    last_layer_num, last_layer_line, last_extrusion_line = _find_last_layer_info(lines)
+
+    # ============================================================
     # START 끝 감지: 첫 번째 레이어 시작점
-    first_layer_markers = [";LAYER:0", ";LAYER_CHANGE", ";TYPE:"]
+    # ============================================================
+    first_layer_markers = [
+        ";LAYER:0", ";LAYER_CHANGE", ";TYPE:",
+        "; CHANGE_LAYER", "; FEATURE:", ";Z:"
+    ]
     for i, line in enumerate(lines):
         if line.comment:
+            comment_check = f";{line.comment}".upper()
             for marker in first_layer_markers:
-                if marker in line.comment.upper() or marker in f";{line.comment}".upper():
+                if marker.upper() in comment_check:
                     start_end = i  # 이 라인 직전까지 START
                     break
             if start_end > 0:
                 break
-    
+
     # 만약 레이어 마커가 없으면, 첫 번째 Z 이동을 START 끝으로
     if start_end == 0:
         for i, line in enumerate(lines[:min(500, total_lines)]):
             if line.cmd in ["G0", "G1"] and "Z" in line.params:
-                if line.params.get("Z", 0) > 0 and line.params.get("Z", 0) < 1:
+                z_val = line.params.get("Z", 0)
+                if 0 < z_val < 1:  # 첫 레이어 높이 (0.1~0.3mm 정도)
                     start_end = i
                     break
-    
+
     # 아직도 못 찾았으면 처음 100줄을 START로
     if start_end == 0:
         start_end = min(100, total_lines)
-    
-    # END 시작 감지: 뒤에서부터 탐색
-    end_markers_comment = [";END", "END GCODE", "; END", ";Time elapsed", "END_GCODE"]
-    end_found = False
 
-    # 1. 먼저 종료 코멘트 찾기 (가장 확실한 기준) - 앞에서부터 탐색
+    # ============================================================
+    # END 시작 감지 (강화된 버전)
+    # ============================================================
+
+    # END 마커 패턴들 (다양한 슬라이서 지원)
+    end_markers_comment = [
+        # 명시적 END 마커
+        ";END", "; END", ";END_GCODE", "; END_GCODE",
+        ";END GCODE", "; END GCODE", "END_GCODE_BEGIN",
+        # 시간 정보 (END 직전에 나옴)
+        ";TIME ELAPSED", "; TIME ELAPSED", ";Time elapsed",
+        # Bambu/Orca
+        "; EXECUTABLE_BLOCK_END", "; filament end gcode",
+        # PrusaSlicer
+        "; Filament-specific end G-code",
+    ]
+
+    end_found = False
     search_start = max(0, total_lines - 500)
+
+    # 1. 명시적 END 코멘트 찾기 (가장 확실한 기준)
     for i in range(search_start, total_lines):
         line = lines[i]
         if line.comment:
+            comment_upper = line.comment.upper()
             for marker in end_markers_comment:
-                if marker.upper() in line.comment.upper():
+                marker_upper = marker.upper().lstrip(";").strip()
+                if marker_upper in comment_upper:
                     body_end = i
                     end_found = True
                     break
             if end_found:
                 break
 
-    # 2. 종료 코멘트 없으면, M104 S0 / M140 S0 찾기 (뒤에서부터)
-    if not end_found:
-        for i in range(total_lines - 1, search_start, -1):
+    # 2. 마지막 레이어/익스트루전 이후 온도 끄기 명령 찾기
+    if not end_found and last_extrusion_line > 0:
+        # 마지막 익스트루전 이후에서 M104 S0 / M140 S0 찾기
+        for i in range(last_extrusion_line + 1, total_lines):
             line = lines[i]
+            # 온도 0으로 설정 = END 시작
             if line.cmd in ["M104", "M140"] and line.params.get("S") == 0:
                 body_end = i
                 end_found = True
                 break
+            # M109 S0 / M190 S0 도 END 시작
+            if line.cmd in ["M109", "M190"] and line.params.get("S") == 0:
+                body_end = i
+                end_found = True
+                break
 
-    # 3. 그래도 못 찾으면, G28 (홈으로) 또는 M84 (모터 끄기) 찾기
+    # 3. 뒤에서부터 M104 S0 / M140 S0 찾기
+    if not end_found:
+        for i in range(total_lines - 1, search_start, -1):
+            line = lines[i]
+            if line.cmd in ["M104", "M140", "M109", "M190"]:
+                if line.params.get("S") == 0:
+                    # 이 명령 이전의 마지막 익스트루전을 BODY 끝으로
+                    for j in range(i - 1, search_start, -1):
+                        prev_line = lines[j]
+                        if prev_line.cmd in ["G0", "G1"] and "E" in prev_line.params:
+                            body_end = j + 1
+                            end_found = True
+                            break
+                    if not end_found:
+                        body_end = i
+                        end_found = True
+                    break
+
+    # 4. G28 (홈으로) 또는 M84 (모터 끄기) 찾기
     if not end_found:
         for i in range(total_lines - 1, search_start, -1):
             line = lines[i]
             if line.cmd in ["G28", "M84"]:
-                # 이 명령이 있는 곳부터 END 시작점 앞으로 찾기
+                # 이 명령 이전의 마지막 익스트루전 찾기
                 for j in range(i, search_start, -1):
                     prev_line = lines[j]
-                    # 마지막 압출(E 파라미터) 라인 = BODY 끝
                     if prev_line.cmd in ["G0", "G1"] and "E" in prev_line.params:
                         body_end = j + 1
                         end_found = True
                         break
                 break
 
-    # 4. 최소한 끝에서 50줄은 END로 보장 (fallback)
-    min_end_size = min(50, max(total_lines // 20, 10))  # 최소 50줄 또는 전체의 5%
-    if body_end > total_lines - min_end_size:
+    # 5. Fallback: 마지막 익스트루전 라인 + 여유분
+    if not end_found and last_extrusion_line > 0:
+        # 마지막 익스트루전 이후 50줄을 END로
+        body_end = min(last_extrusion_line + 50, total_lines - 10)
+        end_found = True
+
+    # 6. 최종 Fallback: 끝에서 50줄은 END로
+    if not end_found:
+        min_end_size = min(50, max(total_lines // 20, 10))
         body_end = total_lines - min_end_size
 
     # body_end가 start_end보다 작으면 안됨
     if body_end <= start_end:
         body_end = total_lines - min(50, total_lines // 10)
-    
-    return SectionBoundaries(start_end, body_end, total_lines)
+
+    # body_end가 total_lines보다 크면 안됨
+    if body_end >= total_lines:
+        body_end = total_lines - 1
+
+    return SectionBoundaries(
+        start_end=start_end,
+        body_end=body_end,
+        total_lines=total_lines,
+        last_layer=last_layer_num,
+        last_layer_line=last_layer_line,
+        last_extrusion_line=last_extrusion_line
+    )
+
 
 def get_section_for_event(
     line_index: int,
@@ -134,7 +275,7 @@ def get_section_for_event(
     이벤트 라인의 구간과 추가 정보 반환
     """
     section = boundaries.get_section(line_index)
-    
+
     # 구간 내 위치 정보
     if section == GCodeSection.START:
         position_in_section = line_index
@@ -145,13 +286,46 @@ def get_section_for_event(
     else:
         position_in_section = line_index - boundaries.body_end
         section_size = boundaries.total_lines - boundaries.body_end
-    
+
     progress = position_in_section / section_size if section_size > 0 else 0
-    
+
     return section, {
         "section": section.value,
         "position_in_section": position_in_section,
         "section_size": section_size,
         "progress_in_section": round(progress, 3),
-        "total_lines": boundaries.total_lines
+        "total_lines": boundaries.total_lines,
+        "last_layer": boundaries.last_layer,
+        "is_near_end": boundaries.is_near_end(line_index)
     }
+
+
+def is_end_gcode_pattern(line: GCodeLine, boundaries: SectionBoundaries) -> bool:
+    """
+    END G-code 패턴인지 확인 (오탐 방지용)
+
+    END 구간에서 정상적으로 나타나는 패턴:
+    - M104 S0 / M140 S0 (온도 끄기)
+    - M107 (팬 끄기)
+    - G28 (홈으로)
+    - M84 (모터 끄기)
+    """
+    section = boundaries.get_section(line.index)
+
+    if section == GCodeSection.END:
+        return True
+
+    # BODY 끝부분에서 종료 패턴 감지
+    if boundaries.is_near_end(line.index, threshold=30):
+        # 온도 0으로 설정
+        if line.cmd in ["M104", "M140", "M109", "M190"]:
+            if line.params.get("S") == 0:
+                return True
+        # 모터/팬 끄기
+        if line.cmd in ["M84", "M107"]:
+            return True
+        # 홈으로
+        if line.cmd == "G28":
+            return True
+
+    return False

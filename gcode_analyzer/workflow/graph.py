@@ -85,7 +85,7 @@ def create_analysis_workflow(mode: str = "full", progress_tracker: Optional[Prog
     def output_with_progress(state):
         if progress_tracker:
             progress_tracker.update(0.95, "final_output", "결과 데이터 조립 중...")
-        result = final_output_node(state)
+        result = final_output_node(state, progress_tracker)
         if progress_tracker:
             progress_tracker.update(0.98, "final_output", "분석 완료")
         return result

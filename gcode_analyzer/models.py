@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # --- From Parser ---
 class GCodeLine(BaseModel):
@@ -84,3 +84,78 @@ class ExpertAssessment(BaseModel):
 class GCodeAnalysisResult(BaseModel):
     basic_stats: Dict[str, Any]      # Python 통계
     expert_assessment: ExpertAssessment # LLM 정답지
+
+
+# ============================================================
+# Delta-based G-code Modification Models
+# 델타 기반 G-code 수정 모델
+# ============================================================
+
+class DeltaAction(str, Enum):
+    """델타 액션 유형"""
+    MODIFY = "modify"              # 해당 라인 내용 변경
+    DELETE = "delete"              # 해당 라인 삭제
+    INSERT_BEFORE = "insert_before"  # 해당 라인 앞에 삽입
+    INSERT_AFTER = "insert_after"    # 해당 라인 뒤에 삽입
+
+
+class LineDelta(BaseModel):
+    """
+    단일 라인 변경사항 (델타)
+
+    클라이언트에서 사용자가 수정한 변경사항을 표현
+    서버에서 원본 G-code와 병합하여 최종 파일 생성
+
+    Examples:
+        - 수정: {"lineIndex": 42, "action": "modify", "newContent": "M104 S210"}
+        - 삭제: {"lineIndex": 100, "action": "delete"}
+        - 앞에 추가: {"lineIndex": 50, "action": "insert_before", "newContent": "G4 P500"}
+        - 뒤에 추가: {"lineIndex": 50, "action": "insert_after", "newContent": "M106 S255"}
+    """
+    line_index: int = Field(..., alias="lineIndex")  # 원본 기준 라인 인덱스 (0-based)
+    action: DeltaAction                               # 액션 유형
+    original_content: Optional[str] = Field(None, alias="originalContent")  # modify/delete 시 원본
+    new_content: Optional[str] = Field(None, alias="newContent")            # modify/insert 시 새 내용
+    reason: Optional[str] = None                      # 변경 이유 (선택적, 이력 추적용)
+    patch_id: Optional[str] = Field(None, alias="patchId")  # 연결된 패치 ID (선택적)
+
+    model_config = {"use_enum_values": True, "populate_by_name": True}
+
+
+class DeltaExportRequest(BaseModel):
+    """
+    델타 기반 G-code 내보내기 요청
+
+    클라이언트에서 수정한 델타 목록을 서버로 전송하여
+    원본 G-code와 병합한 최종 파일을 다운로드
+    """
+    analysis_id: str                        # 분석 ID (원본 파일 참조)
+    deltas: List[LineDelta]                 # 변경사항 목록
+    filename: Optional[str] = None          # 출력 파일명 (없으면 자동 생성)
+    include_header_comment: bool = Field(True, alias="includeComments")  # 수정 이력 헤더 주석 포함 여부
+
+    model_config = {
+        "populate_by_name": True,
+        "json_schema_extra": {
+            "example": {
+                "analysis_id": "abc123",
+                "deltas": [
+                    {"lineIndex": 42, "action": "modify", "newContent": "M109 S220"},
+                    {"lineIndex": 100, "action": "delete"},
+                    {"lineIndex": 50, "action": "insert_after", "newContent": "M190 S65"}
+                ],
+                "filename": "my_model_modified.gcode",
+                "includeComments": True
+            }
+        }
+    }
+
+
+class DeltaExportResponse(BaseModel):
+    """델타 내보내기 응답 (메타데이터)"""
+    success: bool
+    filename: str
+    total_lines: int                        # 최종 파일 라인 수
+    applied_deltas: int                     # 적용된 델타 수
+    skipped_deltas: int                     # 스킵된 델타 수 (검증 실패 등)
+    warnings: List[str] = []                # 경고 메시지

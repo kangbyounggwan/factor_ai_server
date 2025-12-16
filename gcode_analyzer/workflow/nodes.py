@@ -398,20 +398,21 @@ async def expert_assessment_node(state: AnalysisState, progress_tracker=None) ->
     }
 
 # ============================================================
-# Node 6: 결과 조립 및 패치 계획 (No LLM)
+# Node 6: 결과 조립 및 패치 생성 (Python Only - No LLM)
 # ============================================================
-def final_output_node(state: AnalysisState) -> Dict[str, Any]:
+def final_output_node(state: AnalysisState, progress_tracker=None) -> Dict[str, Any]:
     """
-    최종 결과 구조 조립 및 패치 데이터 포맷팅.
-    LLM을 사용하지 않고 'Expert Assessment' 결과를 기반으로 출력 데이터 생성.
+    최종 결과 구조 조립 및 패치 생성.
+    Expert Assessment 결과를 기반으로 Python 규칙으로 패치 코드 생성.
     """
     from ..patcher import generate_patch_plan, format_patch_preview
-    
+
     expert_result = state.get("expert_assessment", {})
     issues_found = state.get("issues_found", [])
     comprehensive_summary = state.get("comprehensive_summary", {})
     layer_map = state.get("layer_map", {})
     temp_changes = state.get("temp_changes", {})
+    parsed_lines = state.get("parsed_lines", [])
 
     timeline = state.get("timeline", [])
     
@@ -438,7 +439,8 @@ def final_output_node(state: AnalysisState) -> Dict[str, Any]:
         patch_plan = generate_patch_plan(
             issues=patch_candidates,
             lines=state["parsed_lines"],
-            file_path=state["file_path"]
+            file_path=state["file_path"],
+            filament_type=state.get("filament_type", "PLA")
         )
 
     # 2. 패치에 ID 부여 및 이슈-패치 매핑 생성
@@ -515,14 +517,19 @@ def final_output_node(state: AnalysisState) -> Dict[str, Any]:
             patches_with_id.append({
                 "id": patch_id,  # 패치 고유 ID
                 "issue_id": linked_issue_id,  # 연결된 이슈 ID
+                "line": p.line_index,  # 프론트엔드용 (line_index alias)
                 "line_index": p.line_index,
                 "layer": layer_map.get(p.line_index, 0),
+                "original": p.original_line,  # 프론트엔드용 (original_line alias)
                 "original_line": p.original_line,
                 "action": p.action,
+                "modified": p.new_line,  # 프론트엔드용 (new_line alias) - 추가/수정할 코드
                 "new_line": p.new_line,
+                "position": p.position,  # before, after, replace
                 "reason": p.reason,
                 "issue_type": p.issue_type,
-                "autofix_allowed": getattr(p, 'autofix_allowed', True)
+                "autofix_allowed": p.autofix_allowed,
+                "vendor_extension": p.vendor_extension  # 벤더 확장 정보
             })
 
     return {
@@ -557,13 +564,16 @@ def apply_patch_node(state: AnalysisState) -> Dict[str, Any]:
     try:
         patches = [
              PatchSuggestion(
-                 line_index=p["line_index"],
-                 original_line=p["original_line"],
-                 action=p["action"],
-                 new_line=p.get("new_line"),
-                 reason=p["reason"],
+                 line_index=p.get("line_index") or p.get("line", 0),
+                 original_line=p.get("original_line") or p.get("original", ""),
+                 action=p.get("action", "review"),
+                 new_line=p.get("new_line") or p.get("modified"),
+                 reason=p.get("reason", ""),
                  priority=i,
-                 issue_type=p["issue_type"]
+                 issue_type=p.get("issue_type", "unknown"),
+                 autofix_allowed=p.get("autofix_allowed", True),
+                 position=p.get("position"),
+                 vendor_extension=p.get("vendor_extension")
              ) for i, p in enumerate(patch_plan_dict["patches"])
         ]
         
