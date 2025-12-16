@@ -659,42 +659,54 @@ def rule_missing_bed_temp(
     문제: 첫 레이어 접착 실패 위험
 
     체크 방식:
-    - START 구간에서 M140 또는 M190 명령이 없음
+    - 첫 압출 전후 50줄 이내에 M140/M190 명령이 없음
     - 단, 베드 없는 프린터(델타 등)는 정상
     """
     results = []
 
-    has_bed_temp = False
+    BED_TEMP_SEARCH_WINDOW = 50  # 전후 50줄 이내에서 검색
+
+    # 1단계: 모든 베드 온도 설정 위치 수집
+    bed_temp_lines = []  # [(line_idx, line_index, temp), ...]
+    first_extrusion_idx = None
     first_extrusion_line = None
 
     for i, line in enumerate(lines):
         section, _ = get_section_for_event(line.index, boundaries)
 
-        # START에서 베드 온도 명령 체크
-        if section == GCodeSection.START:
-            if line.cmd in ["M140", "M190"] and "S" in line.params:
-                temp = line.params["S"]
-                if temp > 0:
-                    has_bed_temp = True
-
-        # BODY 진입 시 첫 압출 라인 기록
-        if section == GCodeSection.BODY and first_extrusion_line is None:
-            if line.cmd == "G1" and "E" in line.params:
-                e_val = line.params.get("E", 0)
-                if e_val > 0:
-                    first_extrusion_line = line.index
-
-        # END 구간 도달 시 체크 종료
         if section == GCodeSection.END:
             break
 
+        # 베드 온도 명령 수집 (START + BODY 초반)
+        if line.cmd in ["M140", "M190"] and "S" in line.params:
+            temp = line.params["S"]
+            if temp > 0:
+                bed_temp_lines.append((i, line.index, temp))
+
+        # 첫 압출 라인 기록
+        if first_extrusion_idx is None:
+            if line.cmd == "G1" and "E" in line.params:
+                e_val = line.params.get("E", 0)
+                if e_val > 0:
+                    first_extrusion_idx = i
+                    first_extrusion_line = line.index
+
+    # 2단계: 첫 압출 전후 50줄 이내에 베드 온도 설정이 있는지 확인
+    has_bed_temp_nearby = False
+    if first_extrusion_idx is not None:
+        for bed_idx, bed_line_index, bed_temp in bed_temp_lines:
+            # 전후 50줄 이내
+            if abs(bed_idx - first_extrusion_idx) <= BED_TEMP_SEARCH_WINDOW:
+                has_bed_temp_nearby = True
+                break
+
     # 베드 온도 설정 없이 압출 시작
-    if not has_bed_temp and first_extrusion_line:
+    if not has_bed_temp_nearby and first_extrusion_line:
         results.append(RuleResult(
             rule_name="missing_bed_temp",
             triggered=True,
             anomaly=Anomaly(
-                type=AnomalyType.MISSING_BED_TEMP,  # 올바른 타입
+                type=AnomalyType.MISSING_BED_TEMP,
                 line_index=first_extrusion_line,
                 severity="high",
                 message="[경고] 베드 온도가 설정되지 않음 - 첫 레이어 접착 실패 위험",
@@ -705,7 +717,7 @@ def rule_missing_bed_temp(
                 }
             ),
             confidence=0.90,
-            needs_llm_review=False  # 명확한 이슈, LLM 검토 불필요
+            needs_llm_review=False
         ))
 
     return results

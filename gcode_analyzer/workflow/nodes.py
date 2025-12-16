@@ -202,12 +202,16 @@ async def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
         "timestamp": datetime.now().isoformat()
     })
     
-    # 규칙 엔진에서 확실한 이슈 (needs_llm_review=False, critical/high)를 수집
-    # 이 이슈들은 Flash Lite로 빠르게 검증 후 최종 결과에 포함됨
+    # 규칙 엔진에서 이슈 수집 (critical/high)
+    # needs_llm_review에 따라 autofix_allowed 설정
     rule_candidate_issues = []
     for r in rule_results:
-        if r.triggered and r.anomaly and not r.needs_llm_review:
+        if r.triggered and r.anomaly:
             if r.anomaly.severity in ["critical", "high"]:
+                # needs_llm_review=True → autofix_allowed=False (수동 검토 필요)
+                # needs_llm_review=False → autofix_allowed=True (확실한 이슈)
+                autofix_allowed = not r.needs_llm_review
+
                 rule_candidate_issues.append({
                     "has_issue": True,
                     "issue_type": r.anomaly.type.value,
@@ -221,7 +225,8 @@ async def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
                     "section": r.anomaly.context.get("section", "START"),
                     "from_rule_engine": True,
                     "rule_name": r.rule_name,
-                    "context": r.anomaly.context
+                    "context": r.anomaly.context,
+                    "autofix_allowed": autofix_allowed  # 수동 검토 필요 여부
                 })
 
     # Rule Engine 이슈를 Flash Lite로 빠르게 검증 (오탐 필터링)
