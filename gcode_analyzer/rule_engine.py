@@ -538,6 +538,7 @@ def rule_missing_temp_wait(
 
     정상 패턴:
     - M104 S220 → ... → M109 S220 (대기) → G1 E+ (압출)
+    - M109 S220 (대기 먼저) → M104 S220 → G1 E+ (압출) ← 이것도 정상!
 
     문제 패턴:
     - M104 S220 → G1 E+ (압출) ← M109 없이 바로 압출!
@@ -545,24 +546,39 @@ def rule_missing_temp_wait(
     예외 케이스:
     - 이미 충분한 시간이 지남 (500줄 이상) → 온도 도달 가정
     - H 파라미터 사용 (Bambu 확장)
+    - M109가 M104 전/후 어디든 주변에 존재하면 OK
 
     Note: START/BODY 초반부 모두 체크 (일부 슬라이서는 온도 설정이 BODY로 분류됨)
     """
     results = []
 
-    # 노즐 온도 설정 추적
-    nozzle_temp_set = None  # {"line": int, "temp": float}
-    nozzle_temp_waited = False  # M109로 대기했는지
+    M109_SEARCH_WINDOW = 50  # M109를 찾을 윈도우 크기 (전후 50줄)
 
-    LINES_THRESHOLD = 500  # 이 줄 수 이상 지나면 온도 도달 가정
-    EARLY_BODY_LINES = 100  # BODY 초반 100줄까지 체크
-
+    # 1단계: START 구간에서 모든 M109 위치와 온도를 먼저 수집
+    m109_temps = []  # [(line_idx, line_index, temp), ...]
     for i, line in enumerate(lines):
         section, _ = get_section_for_event(line.index, boundaries)
+        if section == GCodeSection.END:
+            break
 
-        # START 또는 BODY 초반부에서만 체크
-        is_early_body = (section == GCodeSection.BODY and
-                         line.index <= boundaries.start_end + EARLY_BODY_LINES)
+        if line.cmd == "M109" and "S" in line.params:
+            temp = line.params["S"]
+            if temp > 0:
+                m109_temps.append((i, line.index, temp))
+
+    def has_m109_nearby(m104_idx: int, m104_temp: float) -> bool:
+        """M104 주변에 비슷한 온도의 M109가 있는지 확인"""
+        for m109_idx, m109_line_index, m109_temp in m109_temps:
+            # 전후 50줄 이내
+            if abs(m109_idx - m104_idx) <= M109_SEARCH_WINDOW:
+                # 같은 온도 또는 비슷한 온도 (±5°C 허용)
+                if abs(m109_temp - m104_temp) <= 5:
+                    return True
+        return False
+
+    # 2단계: M104 발견 시 주변에 M109 있는지 체크
+    for i, line in enumerate(lines):
+        section, _ = get_section_for_event(line.index, boundaries)
 
         if section == GCodeSection.END:
             break  # END 구간 도달 시 종료
@@ -576,55 +592,54 @@ def rule_missing_temp_wait(
                 if vendor_ext and vendor_ext.get("H", 0) > 0:
                     continue  # H 파라미터 있으면 스킵
 
-                nozzle_temp_set = {
-                    "line_idx": i,
-                    "line_index": line.index,
-                    "temp": temp,
-                    "raw": line.raw
-                }
-                nozzle_temp_waited = False
+                # M109가 전후 어디든 있으면 OK → 스킵
+                if has_m109_nearby(i, temp):
+                    continue
 
-        # M109 S### (노즐 온도 대기)
-        if line.cmd == "M109" and "S" in line.params:
-            temp = line.params["S"]
-            if temp > 0:
-                nozzle_temp_waited = True
+                # M109 없음 → 이후에 압출이 바로 시작되는지 체크
+                first_extrusion_line = None
+                lines_to_extrusion = 0
+                for j in range(i + 1, min(i + M109_SEARCH_WINDOW + 1, len(lines))):
+                    check_line = lines[j]
 
-        # G1 E+ (압출) - M109 없이 압출 시작했는지 체크
-        if line.cmd == "G1" and "E" in line.params:
-            e_val = line.params.get("E", 0)
-            if e_val > 0:
-                # 노즐 온도 설정했지만 M109로 대기하지 않음
-                if nozzle_temp_set and not nozzle_temp_waited:
-                    lines_since_temp = i - nozzle_temp_set["line_idx"]
+                    # M109 발견 시 문제 없음
+                    if check_line.cmd == "M109" and "S" in check_line.params:
+                        check_temp = check_line.params["S"]
+                        if check_temp > 0 and abs(check_temp - temp) <= 5:
+                            first_extrusion_line = None  # 문제 없음
+                            break
 
-                    # 50줄 이내에 압출 시작 → 치명적
-                    if lines_since_temp <= 50:
-                        results.append(RuleResult(
-                            rule_name="missing_temp_wait",
-                            triggered=True,
-                            anomaly=Anomaly(
-                                type=AnomalyType.COLD_EXTRUSION,
-                                line_index=nozzle_temp_set["line_index"],
-                                severity="critical",
-                                message=f"[치명적] 온도 대기(M109) 없이 압출 시작 - 노즐이 {nozzle_temp_set['temp']}°C에 도달하기 전에 압출됨",
-                                context={
-                                    "temp_set_line": nozzle_temp_set["line_index"],
-                                    "temp_value": nozzle_temp_set["temp"],
-                                    "first_extrusion_line": line.index,
-                                    "lines_between": lines_since_temp,
-                                    "issue_type": "missing_m109",
-                                    "fix": f"M104 S{int(nozzle_temp_set['temp'])} 명령 뒤에 M109 S{int(nozzle_temp_set['temp'])} 추가 필요"
-                                }
-                            ),
-                            confidence=0.95,
-                            needs_llm_review=False
-                        ))
-                        return results  # 하나만 보고
+                    # 압출 발견
+                    if check_line.cmd == "G1" and "E" in check_line.params:
+                        e_val = check_line.params.get("E", 0)
+                        if e_val > 0 and first_extrusion_line is None:
+                            first_extrusion_line = check_line.index
+                            lines_to_extrusion = j - i
+                            break
 
-                    # 이미 충분한 줄 수가 지났으면 더 이상 체크 불필요
-                    if lines_since_temp > LINES_THRESHOLD:
-                        return results
+                # 50줄 이내에 M109 없이 압출 시작 → 이슈
+                if first_extrusion_line and lines_to_extrusion <= 50:
+                    results.append(RuleResult(
+                        rule_name="missing_temp_wait",
+                        triggered=True,
+                        anomaly=Anomaly(
+                            type=AnomalyType.COLD_EXTRUSION,
+                            line_index=line.index,
+                            severity="critical",
+                            message=f"[치명적] 온도 대기(M109) 없이 압출 시작 - 노즐이 {temp}°C에 도달하기 전에 압출됨",
+                            context={
+                                "temp_set_line": line.index,
+                                "temp_value": temp,
+                                "first_extrusion_line": first_extrusion_line,
+                                "lines_between": lines_to_extrusion,
+                                "issue_type": "missing_m109",
+                                "fix": f"M104 S{int(temp)} 명령 뒤에 M109 S{int(temp)} 추가 필요"
+                            }
+                        ),
+                        confidence=0.95,
+                        needs_llm_review=False
+                    ))
+                    return results  # 하나만 보고
 
     return results
 
