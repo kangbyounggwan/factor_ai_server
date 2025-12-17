@@ -1,15 +1,16 @@
 """
 Expert Assessment Execution Module
+Flash 모델을 사용하여 빠른 최종 평가 생성
 """
 import json
 from typing import Dict, Any, List, Tuple, Optional, Callable
 from .client import get_llm_client
 from .expert_assessment_prompt import EXPERT_ASSESSMENT_PROMPT
 from .language import get_language_instruction
-from ..models import ExpertAssessment
 
 # 스트리밍 콜백 타입
 StreamingCallback = Callable[[str], None]
+
 
 async def generate_expert_assessment(
     summary_info: Dict[str, Any],
@@ -19,8 +20,9 @@ async def generate_expert_assessment(
 ) -> Tuple[Dict[str, Any], Dict[str, int]]:
     """
     모든 분석 정보를 바탕으로 정답지(Expert Assessment) 생성
+    Flash 모델 사용 (빠른 응답)
     """
-    llm = get_llm_client()
+    llm = get_llm_client(max_output_tokens=2048)
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     # 1. 이슈 최적화 (Snippet Context 제거 등)

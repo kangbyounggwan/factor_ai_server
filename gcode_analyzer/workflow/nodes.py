@@ -129,143 +129,170 @@ async def comprehensive_summary_node(state: AnalysisState, progress_tracker=None
 
 
 # ============================================================
-# Node 3: 이벤트 추출 + 룰 엔진 + Flash Lite 검증
+# Node 3: 기본 체크 + LLM 직접 문제 탐지 (NEW!)
 # ============================================================
 async def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
     """
-    온도 이벤트 추출 및 룰/Rule 기반 분석
-    Rule Engine 이슈는 Flash Lite로 빠르게 검증
+    새로운 LLM 중심 분석 구조:
+    1. Rule Engine: 기본 체크만 (온도/베드 설정 유무)
+    2. Flash Lite: 데이터 기반으로 직접 문제 탐지 (3가지 관점)
+       - 온도 분석
+       - 속도/동작 분석
+       - 구조/시퀀스 분석
     """
-    from ..rule_engine import run_all_rules, get_rule_summary, get_llm_review_needed
-    
+    from ..rule_engine import run_basic_checks, run_all_rules, get_rule_summary
+    from ..llm.issue_detector import detect_issues_with_llm, convert_to_legacy_format
+    from dataclasses import asdict
+
     parsed_lines = state["parsed_lines"]
     boundaries_dict = state["section_boundaries"]
-    
+    filament_type = state.get("filament_type", "PLA")
+
     # SectionBoundaries 복원
     boundaries = SectionBoundaries(
         start_end=boundaries_dict["start_end"],
         body_end=boundaries_dict["body_end"],
         total_lines=boundaries_dict["total_lines"]
     )
-    
+
     # 온도 이벤트 추출
     temp_events = extract_temp_events(parsed_lines)
-
-    # 온도 변화 추출 (노즐/베드 분리)
     temp_changes = extract_temp_changes(temp_events)
 
-    # 룰 엔진 실행
-    rule_results = run_all_rules(parsed_lines, temp_events, boundaries)
-    rule_summary = get_rule_summary(rule_results)
-    llm_review_from_rules = get_llm_review_needed(rule_results)
-    
-    # Python 규칙으로 1차 분석
-    analysis_results = analyze_all_temp_events(temp_events, boundaries, parsed_lines)
-    
-    # 요약
-    event_summary = get_summary(analysis_results)
-    event_summary["rule_engine"] = rule_summary
-    
-    # LLM에 보낼 이벤트 필터링
-    needs_llm = [r for r in analysis_results if r.needs_llm_analysis]
-    normal_events = [r for r in analysis_results if not r.needs_llm_analysis]
-    
-    # 룰 엔진에서 발견한 이상 추가
-    for rule_result in llm_review_from_rules:
-        if rule_result.anomaly:
-            already_exists = any(
-                e["event"]["line_index"] == rule_result.anomaly.line_index 
-                for e in [r.dict() for r in needs_llm]
-            )
-            if not already_exists:
-                event_dict = {
-                    "line_index": rule_result.anomaly.line_index,
-                    "cmd": rule_result.anomaly.context.get("cmd", "M104"),
-                    "temp": rule_result.anomaly.context.get("temp", 0)
-                }
-                needs_llm.append(EventAnalysisResult(
-                    event=event_dict,
-                    section="BODY",
-                    section_info={},
-                    is_anomaly=True,
-                    confidence="certain",
-                    anomaly_type=rule_result.anomaly.type.value,
-                    reason=rule_result.anomaly.message,
-                    needs_llm_analysis=True
-                ))
-    
     timeline = state.get("timeline", [])
     timeline.append({
         "step": len(timeline) + 1,
-        "label": f"이벤트 분석: {len(temp_events)}개 이벤트, {len(needs_llm)}개 정밀 분석 필요",
-        "status": "done",
+        "label": f"기본 체크 및 데이터 추출 중...",
+        "status": "running",
         "timestamp": datetime.now().isoformat()
     })
-    
-    # 규칙 엔진에서 이슈 수집 (critical/high)
-    # needs_llm_review에 따라 autofix_allowed 설정
-    rule_candidate_issues = []
-    for r in rule_results:
-        if r.triggered and r.anomaly:
-            if r.anomaly.severity in ["critical", "high"]:
-                # needs_llm_review=True → autofix_allowed=False (수동 검토 필요)
-                # needs_llm_review=False → autofix_allowed=True (확실한 이슈)
-                autofix_allowed = not r.needs_llm_review
 
-                rule_candidate_issues.append({
-                    "has_issue": True,
-                    "issue_type": r.anomaly.type.value,
-                    "severity": r.anomaly.severity,
-                    "description": r.anomaly.message,
-                    "impact": r.anomaly.context.get("impact", "출력 품질 저하 또는 실패 위험"),
-                    "suggestion": r.anomaly.context.get("fix", "수동 확인 필요"),
-                    "affected_lines": [r.anomaly.line_index],
-                    "event_line_index": r.anomaly.line_index,
-                    "layer": 0,
-                    "section": r.anomaly.context.get("section", "START"),
-                    "from_rule_engine": True,
-                    "rule_name": r.rule_name,
-                    "context": r.anomaly.context,
-                    "autofix_allowed": autofix_allowed  # 수동 검토 필요 여부
-                })
+    # ============================================================
+    # 1. Rule Engine: 기본 체크 + 데이터 추출
+    # ============================================================
+    rule_output = run_basic_checks(parsed_lines, temp_events, boundaries)
 
-    # Rule Engine 이슈를 Flash Lite로 빠르게 검증 (오탐 필터링)
-    rule_confirmed_issues = rule_candidate_issues  # 기본값: 검증 없이 모두 포함
-    filtered_issues = []
-    validation_tokens = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    # 기본 체크 결과를 dict로 변환
+    basic_checks = [
+        {
+            "check_name": c.check_name,
+            "passed": c.passed,
+            "message": c.message,
+            "details": c.details
+        }
+        for c in rule_output.basic_checks
+    ]
 
-    if rule_candidate_issues:
-        try:
-            from ..llm.rule_validator import validate_rule_issues
-            rule_confirmed_issues, filtered_issues, validation_tokens = await validate_rule_issues(
-                rule_candidate_issues,
-                parsed_lines,
-                context_lines=10
-            )
-            if filtered_issues:
-                timeline.append({
-                    "step": len(timeline) + 1,
-                    "label": f"LLM 검증: {len(filtered_issues)}건 오탐 필터링됨",
-                    "status": "done",
-                    "timestamp": datetime.now().isoformat()
-                })
-        except Exception as e:
-            # 검증 실패 시 안전하게 원본 유지
-            rule_confirmed_issues = rule_candidate_issues
+    # 추출된 데이터를 dict로 변환
+    extracted_data = {
+        "has_nozzle_temp": rule_output.extracted_data.has_nozzle_temp,
+        "has_bed_temp": rule_output.extracted_data.has_bed_temp,
+        "nozzle_temps": rule_output.extracted_data.nozzle_temps,
+        "bed_temps": rule_output.extracted_data.bed_temps,
+        "temp_changes_in_body": rule_output.extracted_data.temp_changes_in_body,
+        "has_feed_rate": rule_output.extracted_data.has_feed_rate,
+        "speed_stats": rule_output.extracted_data.speed_stats,
+        "first_extrusion_line": rule_output.extracted_data.first_extrusion_line,
+        "last_extrusion_line": rule_output.extracted_data.last_extrusion_line,
+        "extrusion_before_temp_wait": rule_output.extracted_data.extrusion_before_temp_wait,
+        "section_info": rule_output.extracted_data.section_info
+    }
+
+    # 치명적 플래그 (즉시 F등급)
+    critical_flags = rule_output.critical_flags
+
+    timeline[-1]["status"] = "done"
+    timeline[-1]["label"] = f"기본 체크 완료 (통과: {sum(1 for c in basic_checks if c['passed'])}/{len(basic_checks)})"
+
+    # ============================================================
+    # 2. Flash Lite: 직접 문제 탐지 (3가지 관점 병렬 분석)
+    # ============================================================
+    timeline.append({
+        "step": len(timeline) + 1,
+        "label": "AI 문제 탐지 중 (온도/속도/구조 분석)...",
+        "status": "running",
+        "timestamp": datetime.now().isoformat()
+    })
+
+    # LLM 직접 문제 탐지
+    llm_analysis = await detect_issues_with_llm(
+        extracted_data,
+        basic_checks,
+        filament_type
+    )
+
+    # 탐지된 이슈를 기존 형식으로 변환
+    llm_detected_issues = convert_to_legacy_format(llm_analysis.issues)
+
+    timeline[-1]["status"] = "done"
+    timeline[-1]["label"] = f"AI 문제 탐지 완료 ({len(llm_detected_issues)}건 발견)"
+
+    # ============================================================
+    # 3. 치명적 플래그 → 이슈로 변환 (Rule Engine의 명백한 문제)
+    # ============================================================
+    critical_issues_from_flags = []
+    for flag in critical_flags:
+        flag_type, line_info = flag.split(":")
+        line_num = int(line_info.replace("line_", ""))
+
+        critical_issues_from_flags.append({
+            "id": f"CRITICAL-{len(critical_issues_from_flags)+1}",
+            "has_issue": True,
+            "issue_type": flag_type.lower(),
+            "severity": "critical",
+            "description": f"치명적 문제: {flag_type.replace('_', ' ')}",
+            "impact": "즉시 출력 중단 필요",
+            "suggestion": "G-code 재생성 또는 수동 수정 필요",
+            "affected_lines": [line_num],
+            "event_line_index": line_num,
+            "line": line_num,
+            "from_rule_engine": True,
+            "autofix_allowed": True
+        })
+
+    # ============================================================
+    # 4. 모든 이슈 병합 (중복 제거)
+    # ============================================================
+    all_issues = critical_issues_from_flags + llm_detected_issues
+
+    # 중복 제거 (같은 라인)
+    seen_lines = set()
+    unique_issues = []
+    for issue in all_issues:
+        line = issue.get("line") or issue.get("event_line_index")
+        if line not in seen_lines:
+            seen_lines.add(line)
+            unique_issues.append(issue)
+
+    # 심각도 순 정렬
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    unique_issues.sort(key=lambda x: severity_order.get(x.get("severity", "low"), 4))
+
+    # 하위 호환을 위한 기존 형식 데이터 생성
+    rule_results = run_all_rules(parsed_lines, temp_events, boundaries)
+    rule_summary = get_rule_summary(rule_results)
+    analysis_results = analyze_all_temp_events(temp_events, boundaries, parsed_lines)
+    event_summary = get_summary(analysis_results)
+    event_summary["rule_engine"] = rule_summary
+    event_summary["llm_detector"] = {
+        "issues_found": len(llm_detected_issues),
+        "summaries": llm_analysis.summaries
+    }
 
     return {
         "temp_events": [e.dict() for e in temp_events],
-        "temp_changes": temp_changes,  # 온도 변화 전체 (노즐/베드)
-        "rule_results": [{"rule_name": r.rule_name, "triggered": r.triggered,
-                         "confidence": r.confidence,
-                         "anomaly": r.anomaly.dict() if r.anomaly else None}
-                        for r in rule_results],
-        "rule_confirmed_issues": rule_confirmed_issues,  # Flash Lite로 검증된 이슈
-        "rule_filtered_issues": filtered_issues,  # 오탐으로 필터링된 이슈
-        "validation_tokens": validation_tokens,  # 검증에 사용된 토큰
+        "temp_changes": temp_changes,
+        "basic_checks": basic_checks,
+        "extracted_data": extracted_data,
+        "critical_flags": critical_flags,
+        "llm_detected_issues": llm_detected_issues,
+        "llm_analysis_summaries": llm_analysis.summaries,
+        "rule_confirmed_issues": unique_issues,  # 하위 호환
+        "rule_filtered_issues": [],
+        "validation_tokens": llm_analysis.token_usage,
         "event_analysis_results": [r.dict() for r in analysis_results],
-        "events_needing_llm": [r.dict() if hasattr(r, 'dict') else r for r in needs_llm],
-        "normal_events": [r.dict() for r in normal_events],
+        "events_needing_llm": [],  # 이제 LLM이 직접 탐지하므로 불필요
+        "normal_events": [r.dict() for r in analysis_results],
         "event_summary": event_summary,
         "current_step": "analyze_events",
         "progress": 0.35,

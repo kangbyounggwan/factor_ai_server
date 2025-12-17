@@ -1,37 +1,44 @@
 """
-Expert Assessment Prompt - The "Answer Sheet" Generator
+Expert Assessment Prompt - The "Answer Sheet" Generator (고도화 버전)
+LLM이 직접 탐지한 이슈를 기반으로 최종 평가 생성
 """
 from langchain_core.prompts import ChatPromptTemplate
 
 EXPERT_ASSESSMENT_PROMPT = ChatPromptTemplate.from_template("""
 당신은 3D 프린팅 품질 관리 전문가입니다.
-제공된 G-code 분석 데이터와 감지된 이슈 후보들을 검토하여, 최종적인 "품질 평가 정답지(Expert Assessment)"를 작성해주세요.
+AI가 분석한 G-code 데이터와 **직접 탐지한 이슈들**을 검토하여, 최종적인 "품질 평가 정답지(Expert Assessment)"를 작성해주세요.
 
 이 정답지는 사용자에게 제공될 유일한 분석 결과이므로, 중복 없이 명확하고 통찰력 있는 정보를 담아야 합니다.
+
+**중요**: 제공된 이슈들은 AI가 온도/속도/구조 분석을 통해 직접 탐지한 것입니다. 이를 신뢰하고 종합 평가에 반영하세요.
 
 ## 1. 입력 데이터
 ### 기본 통계 (Python 분석)
 {summary_info}
 
-### 감지된 이슈 후보 (1차 필터링됨)
+### AI 탐지 이슈 (온도/속도/구조 분석 결과)
 {issues_json}
 
 ## 2. 평가 기준
+**AI 탐지 이슈 신뢰도**: 위 이슈들은 전문 AI가 3가지 관점(온도, 속도, 구조)에서 분석하여 탐지한 것입니다.
+- `source: temperature` → 온도 분석에서 탐지
+- `source: motion` → 속도/동작 분석에서 탐지
+- `source: structure` → G-code 구조 분석에서 탐지
 1. **일관성**: 전체 품질 점수와 발견된 이슈의 심각도가 일치해야 합니다. (심각한 이슈가 있는데 점수가 높으면 안 됨)
 2. **중복 제거**: "프린팅 개요"와 "상세 분석"에서 같은 말을 반복하지 마세요. 개요는 전체적인 숲을, 상세 분석은 나무를 다룹니다.
 3. **명확성**: 사용자가 바로 이해하고 조치할 수 있는 구체적인 조언을 제공하세요.
 4. **정확성**: 이슈 라인 번호(`line`)는 입력된 `issues_json`의 `line` 값을 그대로 사용해야 합니다. 절대 변경하지 마세요.
 
-## ⚠️ 중요: 이슈 생성 금지!
-**`critical_issues`는 반드시 `issues_json`에 제공된 이슈만 포함해야 합니다.**
-- `issues_json`이 빈 배열(`[]`)이면 → `critical_issues`도 빈 배열(`[]`)이어야 함
-- `summary_info`만 보고 새로운 이슈를 만들어내지 마세요!
-- 라인 번호를 직접 추측하거나 발명하지 마세요!
-- 입력된 이슈가 없으면 → 품질 점수는 90~100점 (S등급)
+## ⚠️ 중요: AI 탐지 이슈 기반 평가!
+**`critical_issues`는 `issues_json`에 제공된 AI 탐지 이슈를 기반으로 작성합니다.**
+- `issues_json`이 빈 배열(`[]`)이면 → `critical_issues`도 빈 배열(`[]`), 품질 점수 90~100점 (S등급)
+- AI가 탐지한 이슈를 신뢰하고 그대로 반영하세요
+- 라인 번호는 `issues_json`의 `line` 값을 그대로 사용
+- 추가로 새 이슈를 만들어내지 마세요 (AI 분석 결과를 존중)
 
 **예시:**
 - `issues_json: []` → `critical_issues: []`, `quality_score: 95`, `quality_grade: "S"`
-- `summary_info`의 통계만으로 이슈를 추론하지 마세요. 1차 분석에서 이미 필터링되었습니다.
+- AI가 탐지한 이슈가 있으면 → 해당 이슈를 `critical_issues`에 포함하고 점수에 반영
 
 ## ⚠️ 치명적 이슈 자동 분류 (반드시 준수!)
 다음 조건에 해당하면 무조건 severity: "critical" 또는 "high"로 분류하고, 점수를 F (0~39)로 부여하세요:

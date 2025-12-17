@@ -16,8 +16,9 @@ LLMProvider = Literal["gemini", "openai"]
 
 # 기본 모델 설정
 MODELS = {
-    "gemini": "gemini-2.5-flash",  # 정밀 분석용
+    "gemini": "gemini-2.5-flash",  # 일반 분석용
     "gemini_lite": "gemini-2.5-flash-lite",  # 빠른 검증용
+    "gemini_pro": "gemini-2.5-pro-preview-06-05",  # Expert Assessment용 (고도화)
     "openai": "gpt-4o",
 }
 
@@ -35,6 +36,28 @@ def get_llm_client_lite(
 
     api_key = get_gemini_api_key()
     model_name = MODELS["gemini_lite"]
+
+    return ChatGoogleGenerativeAI(
+        model=model_name,
+        google_api_key=api_key,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def get_llm_client_pro(
+    temperature: float = 0.0,
+    max_output_tokens: int = 4096
+) -> "BaseChatModel":
+    """
+    고품질 분석용 LLM Client (Gemini Pro)
+    - Expert Assessment (최종 정답지)
+    - 복잡한 종합 분석
+    """
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    api_key = get_gemini_api_key()
+    model_name = MODELS["gemini_pro"]
 
     return ChatGoogleGenerativeAI(
         model=model_name,

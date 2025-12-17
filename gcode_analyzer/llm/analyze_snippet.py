@@ -3,7 +3,7 @@ LLM 스니펫 분석 실행 (토큰 추적 + 스트리밍 지원)
 """
 import json
 from typing import Dict, Any, Tuple, Optional, Callable
-from .client import get_llm_client
+from .client import get_llm_client_lite
 from .analyze_snippet_prompt import ANALYZE_SNIPPET_PROMPT
 from .language import get_language_instruction
 from ..data_preparer import LLMAnalysisInput
@@ -24,7 +24,7 @@ async def analyze_snippet_with_llm(
     Returns:
         Tuple[Dict, Dict]: (분석 결과, 토큰 사용량)
     """
-    llm = get_llm_client()
+    llm = get_llm_client_lite(max_output_tokens=1024)
     
     # 필라멘트 정보 포맷팅
     filament_info_str = "정보 없음"
