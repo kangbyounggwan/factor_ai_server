@@ -109,12 +109,30 @@ def _detect_vendor_extension(
     return None
 
 
-def _is_temperature_command(line: str) -> bool:
-    """온도 관련 명령어인지 확인"""
+def _is_nozzle_temp_command(line: str) -> bool:
+    """노즐 온도 명령어인지 확인"""
     if not line:
         return False
-    temp_cmds = ["M104", "M109", "M140", "M190", "M106"]
-    return any(cmd in line.upper() for cmd in temp_cmds)
+    # M104: 노즐 온도 설정 (대기 없음)
+    # M109: 노즐 온도 설정 후 대기
+    nozzle_cmds = ["M104", "M109"]
+    return any(cmd in line.upper() for cmd in nozzle_cmds)
+
+
+def _is_bed_temp_command(line: str) -> bool:
+    """베드 온도 명령어인지 확인"""
+    if not line:
+        return False
+    # M140: 베드 온도 설정 (대기 없음)
+    # M190: 베드 온도 설정 후 대기
+    bed_cmds = ["M140", "M190"]
+    return any(cmd in line.upper() for cmd in bed_cmds)
+
+
+def _is_temperature_command(line: str) -> bool:
+    """모든 온도 관련 명령어인지 확인 (노즐 + 베드)"""
+    # M106/M107은 팬 제어 명령이므로 제외
+    return _is_nozzle_temp_command(line) or _is_bed_temp_command(line)
 
 
 def _check_nearby_temp_commands(
@@ -460,8 +478,15 @@ def generate_patch_plan(
 
         # 원본 라인 찾기
         original_line = ""
+        original_cmd = ""
         if 0 < line_index <= len(lines):
             original_line = lines[line_index - 1].raw.strip()
+            original_cmd = lines[line_index - 1].cmd
+
+        # 주석만 있는 라인은 분석 대상이 아님 - 건너뛰기
+        # cmd가 비어있으면 주석 라인 또는 빈 라인
+        if not original_cmd or original_line.startswith(";"):
+            continue
 
         # 벤더 확장 파라미터 감지 (슬라이서 정보 활용)
         vendor_extension = _detect_vendor_extension(original_line, detected_slicer)

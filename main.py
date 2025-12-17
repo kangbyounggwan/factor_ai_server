@@ -34,6 +34,9 @@ from auth import extract_user_id_from_token
 # G-code 분석 라우터 import
 from gcode_analyzer.api.router import router as gcode_router
 
+# 트러블슈팅 라우터 import
+from gcode_analyzer.troubleshoot import router as troubleshoot_router
+
 ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS_RAW.split(",")] if ALLOWED_ORIGINS_RAW else ["*"]
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:7000").rstrip("/")
@@ -45,6 +48,9 @@ app = FastAPI(title="Factor AI Proxy API", version="0.1.0")
 
 # G-code 분석 API 라우터 등록
 app.include_router(gcode_router)
+
+# 트러블슈팅 API 라우터 등록
+app.include_router(troubleshoot_router)
 
 # CORS 설정 (개발 환경용 - 프로덕션에서는 NGINX에서 처리)
 app.add_middleware(
@@ -1095,6 +1101,6 @@ def cleanup_old_files(directory: str, max_files: int = 50):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=7000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=7000, reload=False)
 
 
