@@ -76,7 +76,9 @@
       "Bash(del \"c:\\Users\\USER\\factor_AI_python\\gcode_analyzer\\llm\\patch_generator_prompt.py\")",
       "Bash(curl:*)",
       "Bash(\"C:/Users/USER/anaconda3/python.exe\" test_analysis.py)",
-      "Bash(python test_inline.py:*)"
+      "Bash(python test_inline.py:*)",
+      "Bash(dir \"c:\\\\Users\\\\USER\\\\factor_AI_python\")",
+      "Bash(findstr:*)"
     ],
     "deny": [],
     "ask": []
