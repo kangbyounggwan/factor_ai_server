@@ -10,12 +10,14 @@ LangGraph Workflow Nodes (Gold Standard Pattern)
 7. apply_patch_node: 패치 적용
 """
 import asyncio
+import copy
 from typing import Dict, Any, List
 from datetime import datetime
 from .state import AnalysisState
 from ..parser import parse_gcode
 from ..summary import summarize_gcode, build_layer_map
 from ..temp_tracker import extract_temp_events, extract_temp_changes
+from ..rules.temp_scanner import scan_temperature_anomalies
 from ..section_detector import detect_sections, SectionBoundaries
 from ..event_analyzer import analyze_all_temp_events, get_summary, EventAnalysisResult
 from ..data_preparer import extract_temp_event_snippets, detect_filament_from_gcode
@@ -33,6 +35,49 @@ def add_timeline(state: dict, label: str, status: str = "done") -> List[dict]:
     })
     return timeline
 
+
+def _extract_context(
+    gcode_lines: List[str],
+    line_number: int,
+    context_window: int,
+    total_lines: int
+) -> str:
+    """
+    G-code 라인 주변 컨텍스트 추출
+
+    Args:
+        gcode_lines: G-code 라인 리스트
+        line_number: 대상 라인 번호 (1-based)
+        context_window: 앞뒤로 포함할 라인 수
+        total_lines: 전체 라인 수
+
+    Returns:
+        라인 번호가 포함된 G-code 컨텍스트 문자열
+    """
+    if not line_number or line_number < 1:
+        return ""
+
+    # 0-based index로 변환
+    target_idx = line_number - 1
+
+    # 범위 계산 (위아래 context_window 줄씩)
+    start_idx = max(0, target_idx - context_window)
+    end_idx = min(total_lines, target_idx + context_window + 1)
+
+    # 컨텍스트 생성
+    context_parts = []
+    for i in range(start_idx, end_idx):
+        line_num = i + 1
+        line_content = gcode_lines[i] if i < len(gcode_lines) else ""
+
+        # 대상 라인 강조
+        if i == target_idx:
+            context_parts.append(f">>> {line_num}: {line_content}  <<< [문제 라인]")
+        else:
+            context_parts.append(f"    {line_num}: {line_content}")
+
+    return '\n'.join(context_parts)
+
 # ============================================================
 # Node 1: 파싱 + 구간 분류
 # ============================================================
@@ -46,6 +91,9 @@ def parse_node(state: AnalysisState) -> Dict[str, Any]:
     parse_result = parse_gcode(file_path)
     parsed_lines = parse_result.lines
     total_lines = len(parsed_lines)
+
+    # 원본 라인 추출 (gcode_context 생성용)
+    raw_lines = [line.raw for line in parsed_lines]
 
     # 구간 분류
     boundaries = detect_sections(parsed_lines)
@@ -61,6 +109,7 @@ def parse_node(state: AnalysisState) -> Dict[str, Any]:
 
     return {
         "parsed_lines": parsed_lines,
+        "raw_lines": raw_lines,  # gcode_context 생성용
         "summary": summary.dict(),
         "layer_map": layer_map,
         "filament_type": filament_type,
@@ -139,9 +188,11 @@ async def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
        - 온도 분석
        - 속도/동작 분석
        - 구조/시퀀스 분석
+    3. LLM Validation: 감지된 이슈를 컨텍스트와 함께 LLM으로 검증하여 오탐 제거
     """
     from ..rule_engine import run_basic_checks, run_all_rules, get_rule_summary
     from ..llm.issue_detector import detect_issues_with_llm, convert_to_legacy_format
+    from ..llm.issue_validator import validate_issues
     from dataclasses import asdict
 
     parsed_lines = state["parsed_lines"]
@@ -158,6 +209,17 @@ async def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
     # 온도 이벤트 추출
     temp_events = extract_temp_events(parsed_lines)
     temp_changes = extract_temp_changes(temp_events)
+
+    # ============================================================
+    # 0. 온도 패턴 스캐너: BODY 전체 스캔 (LLM 없이 룰 기반)
+    # ============================================================
+    temp_scan_result = scan_temperature_anomalies(
+        temp_events=temp_events,
+        parsed_lines=parsed_lines,
+        boundaries=boundaries,
+        filament_type=filament_type
+    )
+    temp_grouped_issues = temp_scan_result.get("grouped_issues", [])
 
     timeline = state.get("timeline", [])
     timeline.append({
@@ -253,20 +315,78 @@ async def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
     # ============================================================
     # 4. 모든 이슈 병합 (중복 제거)
     # ============================================================
-    all_issues = critical_issues_from_flags + llm_detected_issues
+    # 온도 스캐너 그룹 이슈 + 치명적 플래그 + LLM 탐지 이슈
+    all_issues = temp_grouped_issues + critical_issues_from_flags + llm_detected_issues
 
-    # 중복 제거 (같은 라인)
+    # 중복 제거 (같은 라인 또는 그룹)
+    # 그룹 이슈에 포함된 라인들도 seen_lines에 추가하여 개별 이슈로 중복 등록 방지
     seen_lines = set()
+    seen_groups = set()
     unique_issues = []
+
     for issue in all_issues:
-        line = issue.get("line") or issue.get("event_line_index")
-        if line not in seen_lines:
-            seen_lines.add(line)
-            unique_issues.append(issue)
+        # lines 배열에서 라인 추출 (통일된 형식)
+        issue_lines = issue.get("lines", [])
+
+        # lines가 없으면 all_issues에서 추출 시도
+        if not issue_lines and issue.get("all_issues"):
+            issue_lines = [sub.get("line") for sub in issue.get("all_issues", []) if sub.get("line")]
+
+        # 여전히 없으면 event_line_index 사용 (레거시 호환)
+        if not issue_lines:
+            legacy_line = issue.get("event_line_index")
+            if legacy_line:
+                issue_lines = [legacy_line]
+
+        # 그룹화된 이슈인 경우
+        if issue.get("is_grouped") or len(issue_lines) > 1:
+            group_key = f"{issue.get('type')}_{issue.get('count', len(issue_lines))}"
+            if group_key not in seen_groups:
+                seen_groups.add(group_key)
+                unique_issues.append(issue)
+                # 그룹에 포함된 모든 라인을 seen_lines에 추가 (개별 이슈 중복 방지)
+                for line in issue_lines:
+                    seen_lines.add(line)
+        else:
+            # 개별 이슈인 경우 (lines 배열 첫 번째 사용)
+            line = issue_lines[0] if issue_lines else None
+            if line and line not in seen_lines:
+                seen_lines.add(line)
+                unique_issues.append(issue)
 
     # 심각도 순 정렬
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     unique_issues.sort(key=lambda x: severity_order.get(x.get("severity", "low"), 4))
+
+    # ============================================================
+    # 5. LLM 검증: 감지된 이슈를 컨텍스트와 함께 검증하여 오탐 제거
+    # ============================================================
+    validated_issues = []
+    filtered_issues = []
+    validation_tokens = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    if unique_issues:
+        timeline.append({
+            "step": len(timeline) + 1,
+            "label": f"이슈 검증 중 ({len(unique_issues)}건)...",
+            "status": "running",
+            "timestamp": datetime.now().isoformat()
+        })
+
+        language = state.get("language", "ko")
+
+        # LLM으로 이슈 검증 (앞뒤 50줄 컨텍스트)
+        validated_issues, filtered_issues, validation_tokens = await validate_issues(
+            issues=unique_issues,
+            parsed_lines=parsed_lines,
+            language=language,
+            context_lines=50
+        )
+
+        timeline[-1]["status"] = "done"
+        timeline[-1]["label"] = f"이슈 검증 완료 (유효: {len(validated_issues)}, 오탐 제거: {len(filtered_issues)})"
+    else:
+        validated_issues = unique_issues  # 이슈가 없으면 그대로
 
     # 하위 호환을 위한 기존 형식 데이터 생성
     rule_results = run_all_rules(parsed_lines, temp_events, boundaries)
@@ -278,18 +398,30 @@ async def analyze_events_node(state: AnalysisState) -> Dict[str, Any]:
         "issues_found": len(llm_detected_issues),
         "summaries": llm_analysis.summaries
     }
+    event_summary["llm_validator"] = {
+        "validated": len(validated_issues),
+        "filtered_as_false_positive": len(filtered_issues)
+    }
+
+    # 검증 토큰 + 탐지 토큰 합산
+    total_validation_tokens = {
+        "input_tokens": llm_analysis.token_usage.get("input_tokens", 0) + validation_tokens["input_tokens"],
+        "output_tokens": llm_analysis.token_usage.get("output_tokens", 0) + validation_tokens["output_tokens"],
+        "total_tokens": llm_analysis.token_usage.get("total_tokens", 0) + validation_tokens["total_tokens"]
+    }
 
     return {
         "temp_events": [e.dict() for e in temp_events],
         "temp_changes": temp_changes,
+        "temp_scan_result": temp_scan_result,  # 온도 스캐너 결과 (전체)
         "basic_checks": basic_checks,
         "extracted_data": extracted_data,
         "critical_flags": critical_flags,
         "llm_detected_issues": llm_detected_issues,
         "llm_analysis_summaries": llm_analysis.summaries,
-        "rule_confirmed_issues": unique_issues,  # 하위 호환
-        "rule_filtered_issues": [],
-        "validation_tokens": llm_analysis.token_usage,
+        "rule_confirmed_issues": validated_issues,  # 검증된 이슈만!
+        "rule_filtered_issues": filtered_issues,  # 오탐으로 제거된 이슈
+        "validation_tokens": total_validation_tokens,
         "event_analysis_results": [r.dict() for r in analysis_results],
         "events_needing_llm": [],  # 이제 LLM이 직접 탐지하므로 불필요
         "normal_events": [r.dict() for r in analysis_results],
@@ -323,7 +455,23 @@ async def llm_analyze_node(state: AnalysisState, progress_tracker=None) -> Dict[
     
     if not events_needing_llm:
         # LLM 분석 필요 없어도 Rule Engine 확정 이슈는 포함해야 함
-        rule_confirmed_issues = state.get("rule_confirmed_issues", [])
+        rule_confirmed_issues = copy.deepcopy(state.get("rule_confirmed_issues", []))
+
+        # gcode_context 추가 (early return 경로에서도)
+        # 모든 이슈는 all_issues 배열을 가짐 (단일이어도)
+        raw_lines = state.get("raw_lines", [])
+        if raw_lines:
+            total_gcode_lines = len(raw_lines)
+            context_window = 30
+            for issue in rule_confirmed_issues:
+                # all_issues 내 각 sub_issue에 gcode_context 추가
+                for sub_issue in issue.get("all_issues", []):
+                    line_num = sub_issue.get("line")
+                    if line_num:
+                        sub_issue["gcode_context"] = _extract_context(
+                            raw_lines, line_num, context_window, total_gcode_lines
+                        )
+
         return {
             "llm_results": [],
             "issues_found": rule_confirmed_issues,  # Rule Engine 이슈 포함!
@@ -345,7 +493,16 @@ async def llm_analyze_node(state: AnalysisState, progress_tracker=None) -> Dict[
         filament_info = DEFAULT_FILAMENTS[filament_type].dict()
     
     async def analyze_one(event_result: dict, event_index: int, total_events: int) -> tuple:
-        event_line = event_result["event"]["line_index"]
+        event_line = event_result.get("event", {}).get("line_index")
+        if not event_line:
+            # 라인 번호가 없으면 기본 결과 반환
+            return {
+                "has_issue": False,
+                "event_line_index": None,
+                "layer": 0,
+                "section": event_result.get("section", "unknown")
+            }, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
         idx_0 = event_line - 1
         window = config.snippet_window
         start_0 = max(0, idx_0 - window)
@@ -413,8 +570,15 @@ async def llm_analyze_node(state: AnalysisState, progress_tracker=None) -> Dict[
     llm_issues = [r for r in llm_results if r.get("has_issue", False)]
 
     # 규칙 엔진에서 이미 확정된 이슈 병합 (중복 제거)
-    rule_confirmed_issues = state.get("rule_confirmed_issues", [])
-    confirmed_lines = {issue["event_line_index"] for issue in rule_confirmed_issues}
+    # 깊은 복사하여 원본 손상 방지 및 gcode_context 추가 가능하게
+    rule_confirmed_issues = copy.deepcopy(state.get("rule_confirmed_issues", []))
+
+    # 확정된 이슈의 라인들 수집 (모든 이슈는 lines 배열 사용)
+    confirmed_lines = set()
+    for issue in rule_confirmed_issues:
+        # lines 배열에서 모든 라인 추가
+        for line in issue.get("lines", []):
+            confirmed_lines.add(line)
 
     # LLM 이슈 중 규칙 엔진과 중복되지 않는 것만 추가
     unique_llm_issues = [
@@ -424,6 +588,24 @@ async def llm_analyze_node(state: AnalysisState, progress_tracker=None) -> Dict[
 
     # 규칙 엔진 확정 이슈 + LLM 이슈 (규칙 엔진 이슈가 우선)
     issues_found = rule_confirmed_issues + unique_llm_issues
+
+    # ============================================================
+    # 각 이슈에 gcode_context 추가 (위아래 30줄, 총 60줄)
+    # 모든 이슈는 all_issues 배열을 가짐 (단일이어도)
+    # ============================================================
+    raw_lines = state.get("raw_lines", [])
+    if raw_lines:
+        total_gcode_lines = len(raw_lines)
+        context_window = 30  # 위아래 30줄씩
+
+        for issue in issues_found:
+            # all_issues 내 각 sub_issue에 gcode_context 추가
+            for sub_issue in issue.get("all_issues", []):
+                line_num = sub_issue.get("line")
+                if line_num:
+                    sub_issue["gcode_context"] = _extract_context(
+                        raw_lines, line_num, context_window, total_gcode_lines
+                    )
 
     timeline[-1]["status"] = "done"
     timeline[-1]["label"] = f"이슈 분석 완료 ({len(issues_found)}건 확정, 규칙: {len(rule_confirmed_issues)}건)"

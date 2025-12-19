@@ -86,3 +86,23 @@ def parse_gcode(file_path: str) -> ParseResult:
         parsed_lines.append(parse_line(line, i + 1))
 
     return ParseResult(lines=parsed_lines, encoding=used_encoding, is_fallback=is_fallback)
+
+
+def parse_gcode_from_string(gcode_content: str) -> ParseResult:
+    """Parse a G-code string into a list of structured GCodeLine objects.
+
+    Args:
+        gcode_content: G-code 문자열
+
+    Returns:
+        ParseResult with lines, encoding='string', and is_fallback=False
+    """
+    parsed_lines = []
+
+    # 줄 단위로 파싱
+    lines = gcode_content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+
+    for i, line in enumerate(lines):
+        parsed_lines.append(parse_line(line, i + 1))
+
+    return ParseResult(lines=parsed_lines, encoding='string', is_fallback=False)

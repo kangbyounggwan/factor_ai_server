@@ -69,11 +69,15 @@ class DiagnoseRequest(BaseModel):
     series: Optional[str] = Field(None, description="프린터 시리즈 (예: Ender, X1)")
     model: Optional[str] = Field(None, description="프린터 모델 (예: Ender 3 V2, X1 Carbon)")
     symptom_text: str = Field(..., min_length=5, description="증상 설명 텍스트")
-    images: Optional[List[str]] = Field(None, description="문제 이미지 (base64 인코딩)")
+    images: Optional[List[str]] = Field(None, description="문제 이미지 (base64 인코딩, 최대 5장)")
     language: str = Field("ko", description="응답 언어 (ko, en)")
     filament_type: Optional[str] = Field(None, description="필라멘트 종류 (PLA, ABS, PETG 등)")
     additional_context: Optional[str] = Field(None, description="추가 컨텍스트 정보")
     user_plan: UserPlan = Field(UserPlan.FREE, description="사용자 플랜 (free, basic, pro, enterprise)")
+    model_name: Optional[str] = Field(
+        None,
+        description="사용할 LLM 모델명 (예: gemini-2.5-flash, gpt-4o, claude-3.5-sonnet). None이면 기본 모델 사용"
+    )
 
 
 # ============================================================
@@ -96,6 +100,7 @@ class Solution(BaseModel):
     estimated_time: Optional[str] = Field(None, description="예상 소요 시간")
     tools_needed: Optional[List[str]] = Field(None, description="필요한 도구")
     warnings: Optional[List[str]] = Field(None, description="주의사항")
+    source_refs: Optional[List[str]] = Field(None, description="출처 참고자료 제목")
 
 
 class Reference(BaseModel):
@@ -113,6 +118,7 @@ class ExpertOpinion(BaseModel):
     prevention_tips: List[str] = Field(default_factory=list, description="예방 팁")
     when_to_seek_help: Optional[str] = Field(None, description="전문가 도움이 필요한 경우")
     related_issues: Optional[List[str]] = Field(None, description="관련될 수 있는 다른 문제들")
+    source_refs: Optional[List[str]] = Field(None, description="출처 참고자료 제목")
 
 
 class TokenUsage(BaseModel):
@@ -138,6 +144,13 @@ class DiagnoseResponse(BaseModel):
 # ============================================================
 # Internal Models
 # ============================================================
+class SearchDecision(str, Enum):
+    """검색 필요 여부 판단 결과"""
+    NOT_NEEDED = "not_needed"      # 내부 KB로 해결 가능
+    RECOMMENDED = "recommended"    # 검색 권장 (더 정확한 답을 위해)
+    REQUIRED = "required"          # 검색 필수 (외부 근거 필요)
+
+
 class ImageAnalysisResult(BaseModel):
     """이미지 분석 결과 (내부용)"""
     detected_problems: List[ProblemType] = Field(default_factory=list)
@@ -145,6 +158,23 @@ class ImageAnalysisResult(BaseModel):
     description: str = Field("")
     visual_evidence: List[str] = Field(default_factory=list)
     tokens_used: int = Field(0)
+    # 질문 증강 필드
+    augmented_query: str = Field("", description="검색용 증강 쿼리 (영어)")
+    follow_up_questions: List[str] = Field(default_factory=list, description="사용자에게 물어볼 추가 질문")
+    specific_symptoms: List[str] = Field(default_factory=list, description="구체적 증상 목록")
+    # Gate 필드 (검색 필요 여부)
+    needs_search: SearchDecision = Field(
+        SearchDecision.RECOMMENDED,
+        description="검색 필요 여부 판단"
+    )
+    search_skip_reason: str = Field(
+        "",
+        description="검색 스킵 이유 (needs_search가 NOT_NEEDED일 때)"
+    )
+    internal_solution: str = Field(
+        "",
+        description="내부 KB로 해결 가능한 경우의 즉답"
+    )
 
 
 class SearchResult(BaseModel):
@@ -160,3 +190,47 @@ class SearchQueries(BaseModel):
     community_query: str = Field(..., description="커뮤니티 검색 쿼리")
     general_query: str = Field(..., description="일반 웹 검색 쿼리")
     tokens_used: int = Field(0)
+
+
+# ============================================================
+# Perplexity Search Models
+# ============================================================
+class Evidence(BaseModel):
+    """검색된 근거 (Perplexity 결과)"""
+    fact: str = Field(..., description="검색된 사실/정보")
+    source_url: str = Field(..., description="출처 URL")
+    source_title: Optional[str] = Field(None, description="출처 제목")
+    relevance: float = Field(0.8, ge=0, le=1, description="관련성 점수")
+
+
+class PerplexitySearchResult(BaseModel):
+    """Perplexity 검색 결과"""
+    query: str = Field(..., description="검색 쿼리")
+    findings: List[Evidence] = Field(default_factory=list, description="검색된 근거 목록")
+    citations: List[str] = Field(default_factory=list, description="인용 URL 목록")
+    summary: str = Field("", description="검색 결과 요약")
+    tokens_used: int = Field(0, description="사용된 토큰 수")
+
+
+# ============================================================
+# Structured Editor Models
+# ============================================================
+class StructuredDiagnosis(BaseModel):
+    """구조화된 진단 결과 (편집기 출력)"""
+    observed: str = Field(..., description="관찰된 증상 요약")
+    likely_causes: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="가능한 원인 목록 [{cause, source}]"
+    )
+    immediate_checks: List[str] = Field(
+        default_factory=list,
+        description="즉시 확인할 항목"
+    )
+    solutions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="해결책 목록 [{title, steps, source}]"
+    )
+    need_more_info: List[str] = Field(
+        default_factory=list,
+        description="추가로 필요한 정보"
+    )

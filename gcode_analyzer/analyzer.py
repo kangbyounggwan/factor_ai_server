@@ -2,9 +2,43 @@
 통합 분석기 - 워크플로우 실행 엔트리포인트
 """
 import asyncio
+import logging
 from typing import Dict, Any, Optional
 from .workflow import compile_workflow, AnalysisState
 from .workflow.callback import ProgressCallback, ProgressTracker
+
+logger = logging.getLogger(__name__)
+
+
+def _sync_discovered_issue_types(issues_found: list) -> None:
+    """
+    분석에서 발견된 이슈 유형들을 DB에 동기화
+
+    새로운 이슈 유형이 발견되면 자동으로 DB에 추가합니다.
+    """
+    if not issues_found:
+        return
+
+    try:
+        from .db.issue_types import ensure_issue_type_exists
+
+        # 발견된 이슈 유형 수집 (중복 제거)
+        issue_types = set()
+        for issue in issues_found:
+            issue_type = issue.get("type") or issue.get("issue_type")
+            if issue_type:
+                issue_types.add(issue_type)
+
+        # 각 이슈 유형 존재 여부 확인 및 생성
+        for type_code in issue_types:
+            ensure_issue_type_exists(type_code)
+
+        if issue_types:
+            logger.debug(f"[Analyzer] Synced {len(issue_types)} issue types: {issue_types}")
+
+    except Exception as e:
+        # DB 동기화 실패해도 분석 결과에는 영향 없음
+        logger.warning(f"[Analyzer] Failed to sync issue types to DB: {e}")
 
 
 def _create_initial_state(
@@ -120,13 +154,17 @@ async def run_analysis(
 
     # 모드에 따라 추가 결과 포함
     if analysis_mode != "summary_only":
+        issues_found = final_state.get("issues_found", [])
         result.update({
-            "issues_found": final_state.get("issues_found", []),
+            "issues_found": issues_found,
             "final_summary": final_state.get("final_summary", {}),
             "expert_assessment": final_state.get("expert_assessment", {}),  # NEW
             "llm_results": final_state.get("llm_results", []),
             "patch_plan": final_state.get("patch_plan"),
         })
+
+        # 발견된 이슈 유형을 DB에 동기화 (비동기로 처리하여 분석 결과 반환에 영향 없음)
+        _sync_discovered_issue_types(issues_found)
 
     return result
 
@@ -221,10 +259,15 @@ async def run_error_analysis_only(
     state.update(output_result)
     tracker.update(1.0, "completed", "에러 분석 완료")
 
+    issues_found = state.get("issues_found", [])
+
+    # 발견된 이슈 유형을 DB에 동기화
+    _sync_discovered_issue_types(issues_found)
+
     return {
-        "issues_found": state.get("issues_found", []),
+        "issues_found": issues_found,
         "final_summary": state.get("final_summary", {}),
-        "expert_assessment": state.get("expert_assessment", {}), # New API field
+        "expert_assessment": state.get("expert_assessment", {}),  # New API field
         "llm_results": state.get("llm_results", []),
         "patch_plan": state.get("patch_plan"),
         "token_usage": state.get("token_usage", {}),

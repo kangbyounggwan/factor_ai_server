@@ -39,13 +39,13 @@ class FreeSearchProvider:
         self.ddg_available = False
         self.wiki_available = False
 
-        # DuckDuckGo 초기화
+        # DuckDuckGo 초기화 (ddgs 패키지 사용)
         try:
-            from duckduckgo_search import DDGS
+            from ddgs import DDGS
             self.ddg_client = DDGS
             self.ddg_available = True
         except ImportError:
-            logger.warning("duckduckgo-search not installed. DuckDuckGo search disabled.")
+            logger.warning("ddgs not installed. DuckDuckGo search disabled.")
 
         # Wikipedia 초기화
         try:
@@ -132,12 +132,12 @@ class FreeSearchProvider:
         tasks = []
 
         if self.ddg_available:
-            tasks.append(self.search_ddg(query, max_results=5))
+            tasks.append(self.search_ddg(query, max_results=10))
 
         if self.wiki_available:
             # Wikipedia는 영어 키워드로 검색하는 게 더 효과적
             wiki_query = f"3D printing {query}"
-            tasks.append(self.search_wikipedia(wiki_query, max_results=2))
+            tasks.append(self.search_wikipedia(wiki_query, max_results=3))
 
         if not tasks:
             return []
@@ -167,25 +167,25 @@ class WebSearcher:
     PLAN_CONFIG = {
         UserPlan.FREE: {
             "use_tavily": False,
-            "max_results": 5,
+            "max_results": 10,
             "search_depth": "basic",
-            "query_types": ["general", "community"],
+            "query_types": ["official", "general", "community"],
         },
         UserPlan.BASIC: {
             "use_tavily": True,
-            "max_results": 5,
+            "max_results": 10,
             "search_depth": "basic",
-            "query_types": ["general", "community"],
+            "query_types": ["official", "general", "community"],
         },
         UserPlan.PRO: {
             "use_tavily": True,
-            "max_results": 10,
+            "max_results": 15,
             "search_depth": "advanced",
             "query_types": ["official", "general", "community"],
         },
         UserPlan.ENTERPRISE: {
             "use_tavily": True,
-            "max_results": 15,
+            "max_results": 20,
             "search_depth": "advanced",
             "query_types": ["official", "general", "community"],
         },

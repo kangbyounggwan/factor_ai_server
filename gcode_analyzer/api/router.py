@@ -987,6 +987,108 @@ async def run_gcode_error_analysis_task(analysis_id: str):
 
 
 # ============================================================
+# Internal Functions for Chat API Integration
+# ============================================================
+
+class GCodeAnalysisInternalResult(BaseModel):
+    """Chat API용 내부 분석 결과"""
+    analysis_id: str
+    status: str
+    segments: Optional[Dict[str, Any]] = None
+    stream_url: str
+    message: str
+    layer_count: int = 0
+
+
+async def process_gcode_analysis_internal(
+    gcode_content: str,
+    user_id: Optional[str] = None,
+    printer_info: Optional[Dict[str, Any]] = None,
+    filament_type: Optional[str] = None,
+    language: str = "ko",
+    analysis_id: Optional[str] = None
+) -> GCodeAnalysisInternalResult:
+    """
+    Chat API에서 직접 호출하는 내부 G-code 분석 함수
+
+    1단계: 세그먼트 추출 (동기) - 즉시 반환
+    2단계: LLM 분석 (백그라운드) - SSE 스트리밍
+
+    Args:
+        gcode_content: G-code 파일 내용
+        user_id: 사용자 ID
+        printer_info: 프린터 정보
+        filament_type: 필라멘트 타입
+        language: 응답 언어
+        analysis_id: 분석 ID (없으면 자동 생성)
+
+    Returns:
+        GCodeAnalysisInternalResult: 세그먼트 데이터 + 스트림 URL
+    """
+    from gcode_analyzer.segment_extractor import extract_segments, EncodingError
+
+    analysis_id = analysis_id or str(uuid.uuid4())
+
+    # 임시 파일 생성
+    output_dir = os.getenv("OUTPUT_DIR", "./output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    temp_file_path = os.path.join(output_dir, f"gcode_chat_{analysis_id}.gcode")
+    with open(temp_file_path, 'w', encoding='utf-8') as f:
+        f.write(gcode_content)
+
+    # 1단계: 세그먼트 추출 (동기)
+    try:
+        segments = extract_segments(temp_file_path, binary_format=True)
+        layer_count = segments.get('metadata', {}).get('layerCount', 0)
+    except EncodingError as e:
+        logger.error(f"[GCode] Segment extraction encoding error: {e}")
+        raise ValueError(f"G-code 인코딩 오류: {e}")
+    except Exception as e:
+        logger.error(f"[GCode] Segment extraction failed: {e}")
+        raise ValueError(f"G-code 세그먼트 추출 실패: {e}")
+
+    # 분석 상태 초기화
+    initial_data = {
+        "status": "segments_ready",
+        "progress": 0.2,  # 세그먼트 추출 완료
+        "current_step": "segments_extracted",
+        "progress_message": f"세그먼트 추출 완료 ({layer_count}개 레이어)",
+        "timeline": [{
+            "step": 1,
+            "label": f"세그먼트 추출 완료 ({layer_count}개 레이어)",
+            "status": "done",
+            "timestamp": datetime.now().isoformat()
+        }],
+        "temp_file": temp_file_path,
+        "printer_info": printer_info,
+        "filament_type": filament_type,
+        "user_id": user_id,
+        "language": language,
+        "segments": segments,
+        "result": None,
+        "error": None,
+        "created_at": datetime.now().isoformat()
+    }
+    set_analysis(analysis_id, initial_data)
+
+    logger.info(f"[GCode] Chat analysis started: {analysis_id} (layers={layer_count})")
+
+    # 2단계: LLM 분석 백그라운드 실행
+    import asyncio
+    asyncio.create_task(run_gcode_analysis_task(analysis_id))
+
+    return GCodeAnalysisInternalResult(
+        analysis_id=analysis_id,
+        status="segments_ready",
+        segments=segments,
+        stream_url=f"/api/v1/gcode/analysis/{analysis_id}/stream",
+        message=f"세그먼트 추출 완료. {layer_count}개 레이어를 감지했습니다. LLM 분석이 백그라운드에서 진행됩니다.",
+        layer_count=layer_count
+    )
+
+
+# ============================================================
 # Segment + LLM Streaming Analysis API
 # ============================================================
 
@@ -1146,4 +1248,249 @@ async def get_gcode_segments(analysis_id: str):
         "segments": segments
     }
 
+
+# ============================================================
+# AI Issue Resolver API (AI 해결하기)
+# ============================================================
+
+class IssueResolveRequest(BaseModel):
+    """이슈 해결 요청"""
+    analysis_id: str  # 분석 ID
+    conversation_id: Optional[str] = None  # 대화 세션 ID (같은 대화로 묶기 위함)
+    issue: Dict[str, Any]  # 이슈 정보 (line, type, severity, title, description 등)
+    gcode_context: Optional[str] = None  # 클라이언트에서 전달하는 G-code 컨텍스트 (앞뒤 50줄, 총 100줄)
+    language: str = "ko"
+
+
+@router.post("/analysis/{analysis_id}/resolve-issue")
+async def resolve_gcode_issue(analysis_id: str, request: IssueResolveRequest):
+    """
+    G-code 이슈에 대한 AI 해결 방법 제공
+
+    이슈의 원인을 분석하고 상세한 해결 방법을 제공합니다.
+
+    ## 요청 예시
+    ```json
+    {
+        "analysis_id": "uuid-xxx",
+        "conversation_id": "conv_abc123",
+        "issue": {
+            "line": 137,
+            "type": "cold_extrusion",
+            "severity": "high",
+            "title": "저온 압출",
+            "description": "첫 압출 전 노즐 온도가 충분하지 않습니다.",
+            "fix_proposal": "M109 S200 추가"
+        },
+        "gcode_context": "135: G1 X10 Y10\\n136: M104 S0\\n>>> 137: G1 E5 F300\\n138: G1 X20...",
+        "language": "ko"
+    }
+    ```
+
+    ## 응답 구조
+    - conversation_id: 대화 세션 ID
+    - problem_analysis: 문제 원인 분석
+    - impact: 출력물에 미치는 영향
+    - solution: 단계별 해결 방법
+    - code_fix: 수정된 G-code (있는 경우)
+    - prevention: 예방 방법
+    """
+    from gcode_analyzer.llm.issue_resolver import resolve_issue, extract_gcode_context
+    import uuid as uuid_module
+
+    # conversation_id 생성 또는 사용
+    conversation_id = request.conversation_id or f"conv_{uuid_module.uuid4().hex[:12]}"
+
+    # 분석 데이터 확인
+    if not exists(analysis_id):
+        raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
+
+    data = get_analysis(analysis_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="분석 데이터를 읽을 수 없습니다.")
+
+    line_number = request.issue.get("line", 1)
+
+    # G-code 컨텍스트: 클라이언트 전달값 우선, 없으면 서버에서 추출
+    gcode_context = request.gcode_context
+
+    if not gcode_context:
+        # 서버에서 G-code 파일 읽어서 컨텍스트 추출 (fallback)
+        temp_file = data.get("temp_file")
+        if temp_file and os.path.exists(temp_file):
+            try:
+                with open(temp_file, 'r', encoding='utf-8') as f:
+                    gcode_content = f.read()
+                gcode_context = extract_gcode_context(gcode_content, line_number, context_lines=50)
+            except Exception as e:
+                logger.warning(f"[IssueResolver] Failed to read G-code file: {e}")
+                gcode_context = "(G-code 컨텍스트 없음)"
+        else:
+            gcode_context = "(G-code 컨텍스트 없음)"
+
+    # 요약 정보 추출
+    result_data = data.get("result", {})
+    summary_info = {
+        "temperature": result_data.get("summary", {}).get("temperature", {}),
+        "feed_rate": result_data.get("summary", {}).get("feed_rate", {}),
+        "filament_type": data.get("filament_type"),
+        "slicer_info": result_data.get("summary", {}).get("slicer_info", {})
+    }
+
+    try:
+        result = await resolve_issue(
+            issue=request.issue,
+            gcode_context=gcode_context,
+            summary_info=summary_info,
+            language=request.language
+        )
+
+        return {
+            "success": True,
+            "conversation_id": conversation_id,
+            "analysis_id": analysis_id,
+            "issue_line": line_number,
+            "resolution": result["resolution"],
+            "updated_issue": result["updated_issue"]
+        }
+
+    except Exception as e:
+        logger.error(f"[IssueResolver] Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"이슈 분석 실패: {str(e)}")
+
+
+@router.post("/resolve-issue")
+async def resolve_issue_standalone(request: IssueResolveRequest):
+    """
+    독립 이슈 해결 API (analysis_id 없이도 사용 가능)
+
+    클라이언트에서 G-code 컨텍스트(앞뒤 50줄)를 직접 전달하여 분석합니다.
+
+    ## 요청 예시
+    ```json
+    {
+        "analysis_id": "uuid-xxx",
+        "conversation_id": "conv_abc123",
+        "issue": {
+            "line": 137,
+            "type": "cold_extrusion",
+            "severity": "high",
+            "title": "저온 압출",
+            "description": "첫 압출 전 노즐 온도가 충분하지 않습니다."
+        },
+        "gcode_context": "87: G28\\n88: G1 Z5\\n...\\n>>> 137: G1 E5 F300  <<< [문제 라인]\\n...\\n187: G1 X100"
+    }
+    ```
+    """
+    from gcode_analyzer.llm.issue_resolver import resolve_issue
+    import uuid as uuid_module
+
+    # conversation_id 생성 또는 사용
+    conversation_id = request.conversation_id or f"conv_{uuid_module.uuid4().hex[:12]}"
+
+    # G-code 컨텍스트: 클라이언트 전달값 사용 (없으면 없음으로 처리)
+    gcode_context = request.gcode_context or "(G-code 컨텍스트 없음)"
+
+    try:
+        result = await resolve_issue(
+            issue=request.issue,
+            gcode_context=gcode_context,
+            summary_info={},
+            language=request.language
+        )
+
+        return {
+            "success": True,
+            "conversation_id": conversation_id,
+            "analysis_id": request.analysis_id,
+            "issue_line": request.issue.get("line"),
+            "resolution": result["resolution"],
+            "updated_issue": result["updated_issue"]
+        }
+
+    except Exception as e:
+        logger.error(f"[IssueResolver] Standalone error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"이슈 분석 실패: {str(e)}")
+
+
+# ============================================================
+# Issue Types Management API
+# ============================================================
+
+@router.get("/issue-types")
+async def get_issue_types():
+    """
+    등록된 모든 이슈 유형 조회
+
+    Returns:
+        List[Dict]: 이슈 유형 목록 (type_code, label, category, severity 등)
+    """
+    from gcode_analyzer.db.issue_types import get_all_issue_types
+
+    try:
+        issue_types = get_all_issue_types()
+        return {
+            "success": True,
+            "count": len(issue_types),
+            "issue_types": issue_types
+        }
+    except Exception as e:
+        logger.error(f"[IssueTypes] Error getting issue types: {e}")
+        raise HTTPException(status_code=500, detail=f"이슈 유형 조회 실패: {str(e)}")
+
+
+@router.get("/issue-types/{type_code}")
+async def get_issue_type(type_code: str):
+    """
+    특정 이슈 유형 조회
+
+    Args:
+        type_code: 이슈 유형 코드 (예: "cold_extrusion")
+
+    Returns:
+        Dict: 이슈 유형 정보
+    """
+    from gcode_analyzer.db.issue_types import get_issue_type_info
+
+    try:
+        issue_type = get_issue_type_info(type_code)
+        return {
+            "success": True,
+            "issue_type": issue_type
+        }
+    except Exception as e:
+        logger.error(f"[IssueTypes] Error getting issue type {type_code}: {e}")
+        raise HTTPException(status_code=500, detail=f"이슈 유형 조회 실패: {str(e)}")
+
+
+@router.post("/issue-types/sync")
+async def sync_issue_types():
+    """
+    코드 정의 기반 이슈 유형 DB 동기화
+
+    코드에서 정의된 모든 이슈 유형을 DB에 추가/업데이트합니다.
+    관리자 기능으로 초기 설정 또는 업데이트 시 사용합니다.
+
+    Returns:
+        Dict: 동기화 결과 (created, updated, skipped, errors)
+    """
+    from gcode_analyzer.db.issue_types import sync_issue_types_from_code
+
+    try:
+        result = sync_issue_types_from_code()
+        return {
+            "success": True,
+            "message": "이슈 유형 동기화 완료",
+            "result": {
+                "created": result["created"],
+                "created_count": len(result["created"]),
+                "updated": result["updated"],
+                "updated_count": len(result["updated"]),
+                "skipped_count": len(result["skipped"]),
+                "errors": result["errors"]
+            }
+        }
+    except Exception as e:
+        logger.error(f"[IssueTypes] Error syncing issue types: {e}")
+        raise HTTPException(status_code=500, detail=f"이슈 유형 동기화 실패: {str(e)}")
 

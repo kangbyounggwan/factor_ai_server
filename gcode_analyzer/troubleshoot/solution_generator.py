@@ -172,7 +172,8 @@ class SolutionGenerator:
                     difficulty=difficulty,
                     estimated_time=sol_data.get("estimated_time"),
                     tools_needed=sol_data.get("tools_needed"),
-                    warnings=sol_data.get("warnings")
+                    warnings=sol_data.get("warnings"),
+                    source_refs=sol_data.get("source_refs")
                 ))
 
             # Expert Opinion 파싱
@@ -181,7 +182,8 @@ class SolutionGenerator:
                 summary=expert_data.get("summary", ""),
                 prevention_tips=expert_data.get("prevention_tips", []),
                 when_to_seek_help=expert_data.get("when_to_seek_help"),
-                related_issues=expert_data.get("related_issues")
+                related_issues=expert_data.get("related_issues"),
+                source_refs=expert_data.get("source_refs")
             )
 
             return {

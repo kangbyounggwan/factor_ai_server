@@ -71,7 +71,12 @@
       "Bash(\"/c/Users/USER/anaconda3/python.exe\" -c \"\nfrom gcode_analyzer.parser import parse_gcode\nfrom gcode_analyzer.temp_tracker import extract_temp_events\nfrom gcode_analyzer.section_detector import detect_sections\nfrom gcode_analyzer.rule_engine import run_all_rules, get_llm_review_needed\nfrom gcode_analyzer.event_analyzer import analyze_all_temp_events\n\n# 파싱\nresult = parse_gcode(''C:/Users/USER/Downloads/1765894653684_gg_fixed_heateroff_at_end.gcode'')\nlines = result.lines\ntemp_events = extract_temp_events(lines)\nboundaries = detect_sections(lines)\n\n# 규칙 실행\nrule_results = run_all_rules(lines, temp_events, boundaries)\nllm_review_from_rules = get_llm_review_needed(rule_results)\n\nprint(''=== 규칙에서 LLM 리뷰 필요 ==='')\nfor r in llm_review_from_rules:\n    if r.anomaly:\n        print(f''  라인 {r.anomaly.line_index}: {r.rule_name} - {r.anomaly.severity}'')\n\n# Python 1차 분석\nanalysis_results = analyze_all_temp_events(temp_events, boundaries, lines)\nneeds_llm = [r for r in analysis_results if r.needs_llm_analysis]\n\nprint(f''\\n=== event_analyzer에서 LLM 필요 ({len(needs_llm)}개) ==='')\nfor r in needs_llm[:5]:\n    d = r.dict()\n    print(f''  라인 {d[\"\"event\"\"][\"\"line_index\"\"]}: {d[\"\"anomaly_type\"\"]} - {d[\"\"reason\"\"][:50]}'')\n\")",
       "Bash(\"/c/Users/USER/anaconda3/python.exe\" -c \"import langchain_openai; print(''OK'')\")",
       "Bash(/c/Users/USER/anaconda3/python.exe:*)",
-      "Bash(.venv/Scripts/python.exe:*)"
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(del \"c:\\Users\\USER\\factor_AI_python\\gcode_analyzer\\llm\\patch_generator.py\")",
+      "Bash(del \"c:\\Users\\USER\\factor_AI_python\\gcode_analyzer\\llm\\patch_generator_prompt.py\")",
+      "Bash(curl:*)",
+      "Bash(\"C:/Users/USER/anaconda3/python.exe\" test_analysis.py)",
+      "Bash(python test_inline.py:*)"
     ],
     "deny": [],
     "ask": []

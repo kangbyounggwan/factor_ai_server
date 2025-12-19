@@ -129,19 +129,39 @@ def detect_sections(lines: List[GCodeLine]) -> SectionBoundaries:
     # ============================================================
     # START 끝 감지: 첫 번째 레이어 시작점
     # ============================================================
-    first_layer_markers = [
-        ";LAYER:0", ";LAYER_CHANGE", ";TYPE:",
-        "; CHANGE_LAYER", "; FEATURE:", ";Z:"
+    # 1단계: 명시적 START_GCODE 종료 마커 찾기 (가장 정확)
+    start_end_markers = [
+        "MACHINE_START_GCODE_END",  # Bambu/Orca
+        "START_GCODE_END",
+        "start printing object",     # Bambu/Orca - 실제 출력 시작
+        "LAYER:0",                   # 레이어 0 시작
     ]
     for i, line in enumerate(lines):
         if line.comment:
-            comment_check = f";{line.comment}".upper()
-            for marker in first_layer_markers:
-                if marker.upper() in comment_check:
+            comment_upper = line.comment.upper()
+            for marker in start_end_markers:
+                if marker.upper() in comment_upper:
                     start_end = i  # 이 라인 직전까지 START
                     break
             if start_end > 0:
                 break
+
+    # 2단계: 명시적 마커가 없으면 레이어/타입 마커로 fallback
+    # 주의: "; FEATURE:" 는 START_GCODE 내부에서도 나올 수 있으므로
+    #       MACHINE_START_GCODE_END 이후에만 의미있음
+    if start_end == 0:
+        fallback_markers = [
+            ";LAYER_CHANGE", ";TYPE:", "; CHANGE_LAYER", ";Z:"
+        ]
+        for i, line in enumerate(lines):
+            if line.comment:
+                comment_check = f";{line.comment}".upper()
+                for marker in fallback_markers:
+                    if marker.upper() in comment_check:
+                        start_end = i  # 이 라인 직전까지 START
+                        break
+                if start_end > 0:
+                    break
 
     # 만약 레이어 마커가 없으면, 첫 번째 Z 이동을 START 끝으로
     if start_end == 0:

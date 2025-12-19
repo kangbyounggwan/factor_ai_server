@@ -18,6 +18,7 @@ from .base import BaseRuleEngine, BasicCheckResult, ExtractedData, RuleEngineOut
 from .klipper import KlipperRuleEngine
 from .bambu import BambuRuleEngine
 from .factory import get_rule_engine, RuleEngineFactory
+from .temp_scanner import scan_temperature_anomalies
 
 __all__ = [
     'BaseRuleEngine',
@@ -28,4 +29,5 @@ __all__ = [
     'BasicCheckResult',
     'ExtractedData',
     'RuleEngineOutput',
+    'scan_temperature_anomalies',
 ]

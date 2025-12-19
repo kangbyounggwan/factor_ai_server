@@ -18,7 +18,6 @@ LLMProvider = Literal["gemini", "openai"]
 MODELS = {
     "gemini": "gemini-2.5-flash",  # 일반 분석용
     "gemini_lite": "gemini-2.5-flash-lite",  # 빠른 검증용
-    "gemini_pro": "gemini-2.5-pro-preview-06-05",  # Expert Assessment용 (고도화)
     "openai": "gpt-4o",
 }
 
@@ -36,28 +35,6 @@ def get_llm_client_lite(
 
     api_key = get_gemini_api_key()
     model_name = MODELS["gemini_lite"]
-
-    return ChatGoogleGenerativeAI(
-        model=model_name,
-        google_api_key=api_key,
-        temperature=temperature,
-        max_output_tokens=max_output_tokens,
-    )
-
-
-def get_llm_client_pro(
-    temperature: float = 0.0,
-    max_output_tokens: int = 4096
-) -> "BaseChatModel":
-    """
-    고품질 분석용 LLM Client (Gemini Pro)
-    - Expert Assessment (최종 정답지)
-    - 복잡한 종합 분석
-    """
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    api_key = get_gemini_api_key()
-    model_name = MODELS["gemini_pro"]
 
     return ChatGoogleGenerativeAI(
         model=model_name,
@@ -146,7 +123,74 @@ def get_model_name(provider: Optional[LLMProvider] = None) -> str:
     return MODELS.get(provider, MODELS["gemini"])
 
 
-# 하위 호환성을 위한 별칭
-def get_api_key() -> str:
-    """기존 코드 호환용 - Gemini API 키 반환"""
-    return get_gemini_api_key()
+def get_anthropic_api_key() -> str:
+    """Anthropic API 키 가져오기"""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY not found in environment.")
+    return api_key
+
+
+def get_llm_by_model(
+    model_name: str,
+    temperature: float = 0.3,
+    max_output_tokens: int = 1024
+) -> BaseChatModel:
+    """
+    특정 모델명으로 LLM 클라이언트 생성
+
+    Args:
+        model_name: 모델명 (예: "gemini-2.5-flash-lite", "gpt-4o", "claude-3.5-sonnet")
+        temperature: 온도
+        max_output_tokens: 최대 출력 토큰
+
+    Returns:
+        LangChain BaseChatModel
+    """
+    # 모델명에서 프로바이더 판별
+    model_lower = model_name.lower()
+
+    if "gemini" in model_lower:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        api_key = get_gemini_api_key()
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_key,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+
+    elif "gpt" in model_lower:
+        from langchain_openai import ChatOpenAI
+
+        api_key = get_openai_api_key()
+        return ChatOpenAI(
+            model=model_name,
+            api_key=api_key,
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+        )
+
+    elif "claude" in model_lower:
+        from langchain_anthropic import ChatAnthropic
+
+        api_key = get_anthropic_api_key()
+        return ChatAnthropic(
+            model=model_name,
+            api_key=api_key,
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+        )
+
+    else:
+        # 기본값: Gemini Flash
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        api_key = get_gemini_api_key()
+        return ChatGoogleGenerativeAI(
+            model=MODELS["gemini"],
+            google_api_key=api_key,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )

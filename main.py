@@ -37,6 +37,9 @@ from gcode_analyzer.api.router import router as gcode_router
 # 트러블슈팅 라우터 import
 from gcode_analyzer.troubleshoot import router as troubleshoot_router
 
+# 통합 챗봇 라우터 import
+from gcode_analyzer.chat import router as chat_router
+
 ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS_RAW.split(",")] if ALLOWED_ORIGINS_RAW else ["*"]
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:7000").rstrip("/")
@@ -51,6 +54,9 @@ app.include_router(gcode_router)
 
 # 트러블슈팅 API 라우터 등록
 app.include_router(troubleshoot_router)
+
+# 통합 챗봇 API 라우터 등록
+app.include_router(chat_router)
 
 # CORS 설정 (개발 환경용 - 프로덕션에서는 NGINX에서 처리)
 app.add_middleware(

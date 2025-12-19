@@ -37,7 +37,8 @@ Generate a comprehensive troubleshooting response based on the analysis and sear
             "difficulty": "easy|medium|hard|expert",
             "estimated_time": "X minutes",
             "tools_needed": ["tool1", "tool2"],
-            "warnings": ["Warning if any"]
+            "warnings": ["Warning if any"],
+            "source_refs": ["Title of reference used for this solution"]
         }}
     ],
     "expert_opinion": {{
@@ -47,7 +48,8 @@ Generate a comprehensive troubleshooting response based on the analysis and sear
             "Tip 2 to prevent this issue"
         ],
         "when_to_seek_help": "Conditions when professional help is needed",
-        "related_issues": ["Related issue 1", "Related issue 2"]
+        "related_issues": ["Related issue 1", "Related issue 2"],
+        "source_refs": ["Title of reference used for expert opinion"]
     }}
 }}
 ```
@@ -98,7 +100,8 @@ SOLUTION_GENERATION_PROMPT_KO = """당신은 3D 프린팅 전문 기술자입니
             "difficulty": "easy|medium|hard|expert",
             "estimated_time": "X분",
             "tools_needed": ["도구1", "도구2"],
-            "warnings": ["주의사항"]
+            "warnings": ["주의사항"],
+            "source_refs": ["이 솔루션의 출처가 된 참고자료 제목"]
         }}
     ],
     "expert_opinion": {{
@@ -108,7 +111,8 @@ SOLUTION_GENERATION_PROMPT_KO = """당신은 3D 프린팅 전문 기술자입니
             "이 문제를 예방하는 팁 2"
         ],
         "when_to_seek_help": "전문가 도움이 필요한 상황",
-        "related_issues": ["관련 문제 1", "관련 문제 2"]
+        "related_issues": ["관련 문제 1", "관련 문제 2"],
+        "source_refs": ["전문가 의견의 출처가 된 참고자료 제목"]
     }}
 }}
 ```

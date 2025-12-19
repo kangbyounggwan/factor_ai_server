@@ -7,7 +7,6 @@ from .client import get_llm_client_lite
 from .analyze_snippet_prompt import ANALYZE_SNIPPET_PROMPT
 from .language import get_language_instruction
 from ..data_preparer import LLMAnalysisInput
-from langchain_core.output_parsers import JsonOutputParser
 
 # 스트리밍 콜백 타입
 StreamingCallback = Callable[[str], None]
