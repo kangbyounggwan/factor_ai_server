@@ -309,7 +309,7 @@ async def analyze_gcode_json(request: GCodeAnalysisRequest, background_tasks: Ba
     - printer_info: 프린터 정보 (선택)
     - filament_type: 필라멘트 타입 (선택)
 
-    Returns: analysis_id (SSE 스트리밍에 사용)
+    Returns: analysis_id (폴링 API로 상태 확인에 사용)
 
     Rate Limit:
     - 사용자당 분당 10회, 일일 100회 제한
@@ -372,8 +372,7 @@ async def analyze_gcode_json(request: GCodeAnalysisRequest, background_tasks: Ba
     return {
         "analysis_id": analysis_id,
         "status": "pending",
-        "message": "G-code 분석이 시작되었습니다.",
-        "stream_url": f"/api/v1/gcode/analysis/{analysis_id}/stream"
+        "message": "G-code 분석이 시작되었습니다."
     }
 
 
@@ -576,8 +575,7 @@ async def run_error_analysis(analysis_id: str, background_tasks: BackgroundTasks
     return {
         "analysis_id": analysis_id,
         "status": "running_error_analysis",
-        "message": "에러 분석이 시작되었습니다. (LLM 사용)",
-        "stream_url": f"/api/v1/gcode/analysis/{analysis_id}/stream"
+        "message": "에러 분석이 시작되었습니다. (LLM 사용)"
     }
 
 
@@ -601,61 +599,6 @@ async def get_gcode_analysis_status(analysis_id: str):
         "result": data.get("result"),
         "error": data.get("error")
     }
-
-@router.get("/analysis/{analysis_id}/stream")
-async def stream_gcode_analysis(analysis_id: str):
-    """
-    SSE 스트리밍으로 분석 진행 상황 전송
-
-    EventSource로 연결하여 실시간 진행 상황 수신
-    """
-    if not exists(analysis_id):
-        raise HTTPException(status_code=404, detail="분석을 찾을 수 없습니다.")
-
-    async def event_generator():
-        last_step = 0
-        while True:
-            if not exists(analysis_id):
-                break
-
-            data = get_analysis(analysis_id)
-            if data is None:
-                break
-            timeline = data.get("timeline", [])
-            
-            # 새로운 타임라인 이벤트 전송
-            while last_step < len(timeline):
-                event = timeline[last_step]
-                yield f"event: timeline\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-                last_step += 1
-            
-            # 진행률 전송 (메시지 포함)
-            progress_data = {
-                'progress': data['progress'],
-                'step': data['current_step'],
-                'message': data.get('progress_message', '')
-            }
-            yield f"event: progress\ndata: {json.dumps(progress_data, ensure_ascii=False)}\n\n"
-            
-            # 완료 또는 에러 시 종료
-            if data["status"] in ["completed", "summary_completed", "error"]:
-                if data["status"] in ["completed", "summary_completed"]:
-                    yield f"event: complete\ndata: {json.dumps(data.get('result', {}), ensure_ascii=False)}\n\n"
-                else:
-                    yield f"event: error\ndata: {json.dumps({'error': data.get('error', 'Unknown error')}, ensure_ascii=False)}\n\n"
-                break
-            
-            await asyncio.sleep(0.5)  # 500ms 간격
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
 
 @router.post("/analysis/{analysis_id}/approve")
 async def approve_gcode_patch(analysis_id: str, request: PatchApprovalRequest, background_tasks: BackgroundTasks):
@@ -995,7 +938,6 @@ class GCodeAnalysisInternalResult(BaseModel):
     analysis_id: str
     status: str
     segments: Optional[Dict[str, Any]] = None
-    stream_url: str
     message: str
     layer_count: int = 0
 
@@ -1012,7 +954,7 @@ async def process_gcode_analysis_internal(
     Chat API에서 직접 호출하는 내부 G-code 분석 함수
 
     1단계: 세그먼트 추출 (동기) - 즉시 반환
-    2단계: LLM 분석 (백그라운드) - SSE 스트리밍
+    2단계: LLM 분석 (백그라운드) - 폴링으로 상태 확인
 
     Args:
         gcode_content: G-code 파일 내용
@@ -1082,7 +1024,6 @@ async def process_gcode_analysis_internal(
         analysis_id=analysis_id,
         status="segments_ready",
         segments=segments,
-        stream_url=f"/api/v1/gcode/analysis/{analysis_id}/stream",
         message=f"세그먼트 추출 완료. {layer_count}개 레이어를 감지했습니다. LLM 분석이 백그라운드에서 진행됩니다.",
         layer_count=layer_count
     )
@@ -1095,15 +1036,15 @@ async def process_gcode_analysis_internal(
 @router.post("/analyze-with-segments")
 async def analyze_gcode_with_segments(request: GCodeSegmentAnalysisRequest, background_tasks: BackgroundTasks):
     """
-    세그먼트 추출 + LLM 분석 (스트리밍)
+    세그먼트 추출 + LLM 분석
 
     **2단계 응답 방식:**
     1. 세그먼트 데이터 (Float32Array + Base64) 즉시 반환 (~1-3초)
-    2. LLM 분석 백그라운드 실행, 완료 시 SSE로 전송
+    2. LLM 분석 백그라운드 실행
 
     **사용 방법:**
     1. 이 엔드포인트 호출 → segments 데이터 즉시 수신
-    2. analysis_id로 SSE 스트림 연결 → LLM 분석 진행률 & 결과 수신
+    2. GET /analysis/{analysis_id} 로 폴링하여 LLM 분석 진행률 & 결과 확인
 
     **응답 예시:**
     ```json
@@ -1124,8 +1065,7 @@ async def analyze_gcode_with_segments(request: GCodeSegmentAnalysisRequest, back
             ],
             "metadata": { ... }
         },
-        "llm_analysis_started": true,
-        "stream_url": "/api/v1/gcode/analysis/{analysis_id}/stream"
+        "llm_analysis_started": true
     }
     ```
     """
@@ -1218,8 +1158,7 @@ async def analyze_gcode_with_segments(request: GCodeSegmentAnalysisRequest, back
         "status": "segments_ready",
         "segments": segments,
         "llm_analysis_started": True,
-        "message": "세그먼트 추출 완료. LLM 분석이 백그라운드에서 진행됩니다.",
-        "stream_url": f"/api/v1/gcode/analysis/{analysis_id}/stream"
+        "message": "세그먼트 추출 완료. LLM 분석이 백그라운드에서 진행됩니다."
     }
 
 

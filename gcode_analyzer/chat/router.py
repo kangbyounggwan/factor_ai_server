@@ -160,12 +160,10 @@ async def chat(request: ChatRequest):
             original_message=request.message
         )
 
-        # G-code 분석인 경우 analysis_id와 stream_url을 최상위에 노출
+        # G-code 분석인 경우 analysis_id를 최상위에 노출
         analysis_id = None
-        stream_url = None
         if tool_result.success and intent_result.intent == ChatIntent.GCODE_ANALYSIS:
             analysis_id = tool_result.analysis_id or (tool_result.data or {}).get("analysis_id")
-            stream_url = tool_result.stream_url or (tool_result.data or {}).get("stream_url")
 
         return ChatResponse(
             conversation_id=conversation_id,
@@ -178,8 +176,7 @@ async def chat(request: ChatRequest):
             suggested_actions=suggested_actions,
             token_usage=token_usage,
             # G-code 분석 전용 필드
-            analysis_id=analysis_id,
-            stream_url=stream_url
+            analysis_id=analysis_id
         )
 
     except Exception as e:
@@ -255,15 +252,9 @@ async def list_models():
                     "tier": "free"
                 },
                 {
-                    "id": "gemini-2.5-pro",
-                    "name": "Gemini 2.5 Pro",
+                    "id": "gemini-2.5-flash",
+                    "name": "Gemini 2.5 Flash",
                     "description": "빠른 응답",
-                    "tier": "paid"
-                },
-                {
-                    "id": "gemini-3.0-pro",
-                    "name": "Gemini 3.0 Pro",
-                    "description": "최신 모델",
                     "tier": "paid"
                 }
             ]
@@ -281,29 +272,6 @@ async def list_models():
                     "id": "gpt-4o",
                     "name": "GPT-4o",
                     "description": "가장 강력한 모델",
-                    "tier": "paid"
-                },
-                {
-                    "id": "gpt-5.1",
-                    "name": "GPT-5.1",
-                    "description": "최신 모델",
-                    "tier": "paid"
-                }
-            ]
-        },
-        "anthropic": {
-            "name": "Anthropic Claude",
-            "models": [
-                {
-                    "id": "claude-3.5-sonnet",
-                    "name": "Claude 3.5 Sonnet",
-                    "description": "균형 잡힌 성능",
-                    "tier": "paid"
-                },
-                {
-                    "id": "claude-3.5-opus",
-                    "name": "Claude 3.5 Opus",
-                    "description": "최고 지능 모델",
                     "tier": "paid"
                 }
             ]

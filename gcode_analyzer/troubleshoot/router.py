@@ -27,7 +27,8 @@ from pydantic import BaseModel
 from .models import (
     DiagnoseRequest, DiagnoseResponse,
     Problem, Solution, Reference, ExpertOpinion, TokenUsage,
-    ProblemType, SearchDecision, Difficulty, PerplexitySearchResult
+    ProblemType, SearchDecision, Difficulty, PerplexitySearchResult,
+    QueryAugmentation
 )
 from .printer_database import (
     get_all_manufacturers, get_manufacturer,
@@ -319,6 +320,17 @@ async def diagnose_problem(request: DiagnoseRequest):
         token_usage.solution_generation
     )
 
+    # 질문 증강 결과 구성
+    query_augmentation = QueryAugmentation(
+        original_symptom=request.symptom_text or "",
+        augmented_query=augmented_query,
+        detected_problems=[p.value for p in (image_analysis.detected_problems if image_analysis else [])],
+        visual_evidence=image_analysis.visual_evidence if image_analysis else [],
+        specific_symptoms=image_analysis.specific_symptoms if image_analysis else [],
+        follow_up_questions=image_analysis.follow_up_questions if image_analysis else [],
+        search_decision=needs_search.value
+    )
+
     return DiagnoseResponse(
         diagnosis_id=diagnosis_id,
         problem=solution_data["problem"],
@@ -326,7 +338,8 @@ async def diagnose_problem(request: DiagnoseRequest):
         references=references[:10],
         expert_opinion=solution_data["expert_opinion"],
         printer_info=printer_info,
-        token_usage=token_usage
+        token_usage=token_usage,
+        query_augmentation=query_augmentation
     )
 
 

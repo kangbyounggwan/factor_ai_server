@@ -92,7 +92,7 @@ class ResponseGenerator:
         G-code 분석 응답 생성 (Chat API 통합)
 
         세그먼트 추출이 완료되고 LLM 분석이 백그라운드에서 진행 중인 상태를 응답합니다.
-        클라이언트는 stream_url로 SSE 연결하여 진행률을 확인할 수 있습니다.
+        클라이언트는 GET /analysis/{analysis_id} 폴링으로 진행률을 확인할 수 있습니다.
         """
         data = tool_result.data or {}
 
@@ -111,14 +111,13 @@ class ResponseGenerator:
         """
         G-code 스트리밍 분석 응답 (세그먼트 즉시 반환 + LLM 백그라운드)
 
-        클라이언트가 세그먼트를 즉시 렌더링하고 SSE로 진행률을 추적할 수 있도록 합니다.
+        클라이언트가 세그먼트를 즉시 렌더링하고 폴링으로 진행률을 추적할 수 있도록 합니다.
         """
         data = tool_result.data or {}
 
         filename = data.get("filename", "G-code")
         layer_count = data.get("layer_count", 0)
         analysis_id = data.get("analysis_id", "")
-        stream_url = data.get("stream_url", "")
 
         # 세그먼트 데이터에서 경로 수 계산
         segments = data.get("segments", {})
@@ -128,29 +127,24 @@ class ResponseGenerator:
         total_extrusions = sum(layer.get("extrusionCount", 0) for layer in layers_data)
         total_travels = sum(layer.get("travelCount", 0) for layer in layers_data)
 
-        response = f"""**G-code 분석 시작!** 🔄
+        response = f"""**G-code 분석 시작!**
 
 **파일:** {filename}
 **상태:** 세그먼트 추출 완료, LLM 분석 진행 중...
 
-**📊 감지된 정보:**
+**감지된 정보:**
 - 총 레이어: **{layer_count}개**
 - 압출 경로: {total_extrusions:,}개
 - 이동 경로: {total_travels:,}개
 
 3D 뷰어에서 레이어를 확인할 수 있습니다.
-상세 분석이 완료되면 품질 점수와 이슈를 알려드릴게요!
-
-> 💡 진행률은 실시간으로 업데이트됩니다."""
+상세 분석이 완료되면 품질 점수와 이슈를 알려드릴게요!"""
 
         actions = [
             SuggestedAction(
-                label="분석 진행률 확인",
-                action="connect_stream",
-                data={
-                    "analysis_id": analysis_id,
-                    "stream_url": stream_url
-                }
+                label="분석 상태 확인",
+                action="check_status",
+                data={"analysis_id": analysis_id}
             ),
             SuggestedAction(
                 label="레이어 탐색",
@@ -397,9 +391,19 @@ class ResponseGenerator:
         self,
         tool_result: ToolResult
     ) -> tuple[str, List[SuggestedAction]]:
-        """일반 질문 응답"""
+        """일반 질문 응답 (참조 URL 포함)"""
         data = tool_result.data or {}
         answer = data.get("answer", "죄송합니다, 답변을 생성할 수 없습니다.")
+        references = data.get("references", [])
+
+        # 참조 URL이 있으면 응답에 추가
+        if references:
+            answer += "\n\n---\n\n**📚 참고 자료:**\n"
+            for ref in references[:5]:
+                title = ref.get("title", "")
+                url = ref.get("url", "")
+                if title and url:
+                    answer += f"- [{title}]({url})\n"
 
         actions = [
             SuggestedAction(

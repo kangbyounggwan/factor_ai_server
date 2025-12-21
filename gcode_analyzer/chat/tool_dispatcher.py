@@ -283,7 +283,7 @@ class ToolDispatcher:
         단일 Chat API 요청으로 처리합니다.
 
         Returns:
-            ToolResult: 세그먼트 데이터 + analysis_id + stream_url 포함
+            ToolResult: 세그먼트 데이터 + analysis_id 포함
         """
         # G-code 파일 찾기
         gcode_attachment = next(
@@ -329,14 +329,12 @@ class ToolDispatcher:
                     "analysis_id": result.analysis_id,
                     "status": result.status,
                     "segments": result.segments,
-                    "stream_url": result.stream_url,
                     "layer_count": result.layer_count,
                     "filename": filename,
                     "message": result.message
                 },
                 # 최상위 레벨에도 노출 (편의용)
                 analysis_id=result.analysis_id,
-                stream_url=result.stream_url,
                 segments=result.segments
             )
 
@@ -383,7 +381,7 @@ class ToolDispatcher:
         # UserPlan 매핑
         plan_mapping = {
             UserPlan.FREE: TroubleshootUserPlan.FREE,
-            UserPlan.STARTER: TroubleshootUserPlan.BASIC,  # STARTER → BASIC 매핑
+            UserPlan.STARTER: TroubleshootUserPlan.STARTER,
             UserPlan.PRO: TroubleshootUserPlan.PRO,
             UserPlan.ENTERPRISE: TroubleshootUserPlan.ENTERPRISE,
         }
@@ -626,26 +624,63 @@ class ToolDispatcher:
         message: str,
         conversation_history: Optional[List[ConversationHistoryItem]] = None
     ) -> ToolResult:
-        """일반 질문 답변"""
-        # LLM으로 답변 생성
+        """일반 질문 답변 (웹 검색 포함)"""
         from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
         from ..llm.client import get_llm_by_model
+        from ..troubleshoot.web_searcher import FreeSearchProvider
 
-        # 선택된 모델이 있으면 해당 모델 사용, 없으면 기본 모델 (gemini-2.5-flash-lite)
+        # 1. 웹 검색 수행
+        search_results_text = ""
+        references = []
+
+        try:
+            free_search = FreeSearchProvider()
+
+            # 3D 프린팅 관련 검색어로 변환
+            search_query = f"3D printing {message}"
+            search_results = await free_search.search(search_query)
+
+            if search_results:
+                search_results_text = "\n\n## 검색 결과\n"
+                for i, ref in enumerate(search_results[:10], 1):
+                    search_results_text += f"\n### [{i}] {ref.title}\n"
+                    search_results_text += f"URL: {ref.url}\n"
+                    if ref.snippet:
+                        search_results_text += f"내용: {ref.snippet}\n"
+                    references.append({
+                        "title": ref.title,
+                        "url": ref.url,
+                        "source": ref.source,
+                        "snippet": ref.snippet
+                    })
+
+                logger.info(f"General QA: Found {len(search_results)} search results")
+            else:
+                logger.info("General QA: No search results found")
+
+        except Exception as e:
+            logger.warning(f"General QA search failed: {e}")
+            search_results_text = "\n\n(검색 결과를 가져오지 못했습니다)\n"
+
+        # 2. LLM으로 답변 생성
         model_name = self.selected_model or "gemini-2.5-flash-lite"
         llm = get_llm_by_model(
             model_name=model_name,
             temperature=0.3,
-            max_output_tokens=1024
+            max_output_tokens=2048
         )
 
-        system_prompt = """당신은 3D 프린팅 전문가입니다.
+        system_prompt = f"""당신은 3D 프린팅 전문가입니다.
 사용자의 질문에 친절하고 정확하게 답변해주세요.
 답변은 간결하면서도 실용적인 정보를 포함해야 합니다.
 
+{search_results_text}
+
 ## 중요 원칙
-- 아래 제공된 검색 결과에 명시적으로 존재하지 않는 정보는 절대 추측하거나 생성하지 마세요.
-- 정보가 없으면 "확인된 정보가 없습니다"라고 답변하세요.
+- 위 검색 결과를 참고하여 답변하세요.
+- 검색 결과에 있는 정보를 우선적으로 활용하세요.
+- 검색 결과에 없는 정보는 일반적인 3D 프린팅 지식으로 보완할 수 있습니다.
+- 가격, 재고 등 실시간 정보는 검색 결과에 있는 경우에만 언급하세요.
 
 ## 마크다운 포맷팅 규칙 (반드시 준수)
 
@@ -713,7 +748,8 @@ class ToolDispatcher:
                 tool_name="general_qa",
                 success=True,
                 data={
-                    "answer": response.content
+                    "answer": response.content,
+                    "references": references[:5] if references else None
                 }
             )
 

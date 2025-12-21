@@ -78,7 +78,11 @@
       "Bash(\"C:/Users/USER/anaconda3/python.exe\" test_analysis.py)",
       "Bash(python test_inline.py:*)",
       "Bash(dir \"c:\\\\Users\\\\USER\\\\factor_AI_python\")",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(C:\\\\Users\\\\USER\\\\anaconda3\\\\python.exe:*)",
+      "Bash(rm:*)",
+      "Bash(python test_gemini3.py:*)",
+      "Bash(python test_all_models.py:*)"
     ],
     "deny": [],
     "ask": []

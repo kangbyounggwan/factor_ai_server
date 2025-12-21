@@ -32,7 +32,7 @@ class PerplexitySearcher:
     역할: 검색 + 요약된 근거 수집 (추론 X, 사실만)
 
     사용자 플랜별 모델:
-    - FREE/BASIC: sonar (빠른 검색)
+    - FREE/STARTER: sonar (빠른 검색)
     - PRO: sonar-pro (심층 검색)
     - ENTERPRISE: sonar-pro (심층 검색)
     """
@@ -42,7 +42,7 @@ class PerplexitySearcher:
             "model": "sonar",
             "max_tokens": 1024,
         },
-        UserPlan.BASIC: {
+        UserPlan.STARTER: {
             "model": "sonar",
             "max_tokens": 1500,
         },

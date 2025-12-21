@@ -66,7 +66,7 @@ class AnalysisState(TypedDict):
     # 사용자 승인 및 패치
     user_approved: bool
 
-    # 진행 상태 (SSE용)
+    # 진행 상태 (폴링용)
     current_step: str
     progress: float
     timeline: List[Dict[str, Any]]

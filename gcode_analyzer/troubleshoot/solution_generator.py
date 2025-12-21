@@ -10,7 +10,8 @@ from langchain_core.messages import HumanMessage
 from ..llm.client import get_llm_client
 from .models import (
     Problem, Solution, ExpertOpinion, Reference,
-    SearchResult, ImageAnalysisResult, ProblemType, Difficulty
+    SearchResult, ImageAnalysisResult, ProblemType, Difficulty,
+    Verdict, VerdictAction
 )
 from .printer_database import get_search_context
 from .prompts.solution import SOLUTION_GENERATION_PROMPT, SOLUTION_GENERATION_PROMPT_KO
@@ -143,6 +144,21 @@ class SolutionGenerator:
 
             data = json.loads(json_str)
 
+            # Verdict 파싱 (한 줄 결론)
+            verdict = None
+            verdict_data = data.get("verdict", {})
+            if verdict_data:
+                try:
+                    action = VerdictAction(verdict_data.get("action", "continue"))
+                except ValueError:
+                    action = VerdictAction.CONTINUE
+
+                verdict = Verdict(
+                    action=action,
+                    headline=verdict_data.get("headline", ""),
+                    reason=verdict_data.get("reason", "")
+                )
+
             # Problem 파싱
             problem_data = data.get("problem", {})
             try:
@@ -187,6 +203,7 @@ class SolutionGenerator:
             )
 
             return {
+                "verdict": verdict,
                 "problem": problem,
                 "solutions": solutions,
                 "expert_opinion": expert_opinion
@@ -245,6 +262,11 @@ class SolutionGenerator:
         })
 
         return {
+            "verdict": Verdict(
+                action=VerdictAction.CONTINUE,
+                headline="추가 정보가 필요해 보입니다.",
+                reason="정확한 진단을 위해 증상을 더 자세히 설명해 주시면 좋겠습니다."
+            ),
             "problem": Problem(
                 type=problem_type,
                 confidence=0.5,

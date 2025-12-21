@@ -47,29 +47,19 @@ class LLMModel(str, Enum):
     """지원하는 LLM 모델"""
     # Gemini 모델 (Google)
     GEMINI_FLASH_LITE = "gemini-2.5-flash-lite"  # 무료 - 빠르고 효율적
-    GEMINI_PRO = "gemini-2.5-pro"                # 유료 - 빠른 응답
-    GEMINI_PRO_3 = "gemini-3.0-pro"              # 유료 - 최신 모델
+    GEMINI_FLASH = "gemini-2.5-flash"            # 유료 - 빠른 응답
 
     # OpenAI 모델
     GPT_4O_MINI = "gpt-4o-mini"                  # 무료 - 빠르고 효율적
     GPT_4O = "gpt-4o"                            # 유료 - 가장 강력한 모델
-    GPT_5_1 = "gpt-5.1"                          # 유료 - 최신 모델
-
-    # Claude 모델 (Anthropic)
-    CLAUDE_SONNET = "claude-3.5-sonnet"          # 유료 - 균형 잡힌 성능
-    CLAUDE_OPUS = "claude-3.5-opus"              # 유료 - 최고 지능 모델
 
 
 # 모델별 프로바이더 매핑
 MODEL_PROVIDER_MAP = {
     LLMModel.GEMINI_FLASH_LITE: "gemini",
-    LLMModel.GEMINI_PRO: "gemini",
-    LLMModel.GEMINI_PRO_3: "gemini",
+    LLMModel.GEMINI_FLASH: "gemini",
     LLMModel.GPT_4O_MINI: "openai",
     LLMModel.GPT_4O: "openai",
-    LLMModel.GPT_5_1: "openai",
-    LLMModel.CLAUDE_SONNET: "anthropic",
-    LLMModel.CLAUDE_OPUS: "anthropic",
 }
 
 
@@ -143,7 +133,6 @@ class ToolResult(BaseModel):
 
     # G-code 분석 전용 필드 (편의를 위해 최상위 레벨에도 노출)
     analysis_id: Optional[str] = Field(None, description="G-code 분석 ID")
-    stream_url: Optional[str] = Field(None, description="SSE 스트림 URL")
     segments: Optional[Dict[str, Any]] = Field(None, description="G-code 세그먼트 데이터")
 
 
@@ -183,7 +172,6 @@ class ChatResponse(BaseModel):
 
     # G-code 분석 전용 필드 (최상위 레벨에서 빠르게 접근 가능)
     analysis_id: Optional[str] = Field(None, description="G-code 분석 ID")
-    stream_url: Optional[str] = Field(None, description="SSE 스트림 URL")
 
 
 # ============================================================

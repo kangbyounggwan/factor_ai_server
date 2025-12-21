@@ -158,7 +158,7 @@ class WebSearcher:
 
     사용자 플랜별 검색 방식:
     - FREE: DuckDuckGo + Wikipedia (무료)
-    - BASIC: Tavily basic (5개 결과)
+    - STARTER: Tavily basic (5개 결과)
     - PRO: Tavily advanced (10개 결과, 더 깊은 검색)
     - ENTERPRISE: Tavily advanced + 모든 쿼리 타입 (15개 결과)
     """
@@ -171,7 +171,7 @@ class WebSearcher:
             "search_depth": "basic",
             "query_types": ["official", "general", "community"],
         },
-        UserPlan.BASIC: {
+        UserPlan.STARTER: {
             "use_tavily": True,
             "max_results": 10,
             "search_depth": "basic",

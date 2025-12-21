@@ -54,9 +54,9 @@ class Difficulty(str, Enum):
 
 class UserPlan(str, Enum):
     """사용자 플랜"""
-    FREE = "free"          # 무료 - DuckDuckGo + Wikipedia
-    BASIC = "basic"        # 기본 유료 - Tavily basic
-    PRO = "pro"            # 프로 - Tavily advanced + 더 많은 결과
+    FREE = "free"              # 무료 - DuckDuckGo + Wikipedia
+    STARTER = "starter"        # 스타터 유료 - Perplexity sonar
+    PRO = "pro"                # 프로 - Perplexity sonar-pro
     ENTERPRISE = "enterprise"  # 기업용 - 모든 기능
 
 
@@ -121,6 +121,19 @@ class ExpertOpinion(BaseModel):
     source_refs: Optional[List[str]] = Field(None, description="출처 참고자료 제목")
 
 
+class VerdictAction(str, Enum):
+    """판정 액션"""
+    CONTINUE = "continue"  # 계속 진행해도 됨
+    STOP = "stop"          # 중단 권장
+
+
+class Verdict(BaseModel):
+    """한 줄 결론 판정 (결과 상단에 표시)"""
+    action: VerdictAction = Field(..., description="계속/중단 판정")
+    headline: str = Field(..., description="한 줄 결론 (굵게, 무조건 제일 위)")
+    reason: str = Field(..., description="기술 용어 없이 안심시키는 설명")
+
+
 class TokenUsage(BaseModel):
     """토큰 사용량"""
     image_analysis: int = Field(0, description="이미지 분석 토큰")
@@ -130,15 +143,28 @@ class TokenUsage(BaseModel):
     total: int = Field(0, description="총 토큰")
 
 
+class QueryAugmentation(BaseModel):
+    """질문 증강 결과 (디버깅/투명성용)"""
+    original_symptom: str = Field("", description="원본 증상 텍스트")
+    augmented_query: str = Field("", description="증강된 검색 쿼리")
+    detected_problems: List[str] = Field(default_factory=list, description="감지된 문제 유형")
+    visual_evidence: List[str] = Field(default_factory=list, description="시각적 증거")
+    specific_symptoms: List[str] = Field(default_factory=list, description="구체적 증상")
+    follow_up_questions: List[str] = Field(default_factory=list, description="추가 질문")
+    search_decision: str = Field("recommended", description="검색 필요 여부 (not_needed, recommended, required)")
+
+
 class DiagnoseResponse(BaseModel):
     """진단 응답"""
     diagnosis_id: str = Field(..., description="진단 ID")
+    verdict: Optional[Verdict] = Field(None, description="한 줄 결론 (결과 상단에 굵게 표시)")
     problem: Problem = Field(..., description="진단된 문제")
     solutions: List[Solution] = Field(..., description="해결책 목록")
     references: List[Reference] = Field(default_factory=list, description="참조 자료")
     expert_opinion: ExpertOpinion = Field(..., description="전문가 의견")
     printer_info: Dict[str, Any] = Field(default_factory=dict, description="프린터 정보")
     token_usage: TokenUsage = Field(default_factory=TokenUsage, description="토큰 사용량")
+    query_augmentation: Optional[QueryAugmentation] = Field(None, description="질문 증강 결과 (디버깅용)")
 
 
 # ============================================================

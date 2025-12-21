@@ -21,6 +21,11 @@ Generate a comprehensive troubleshooting response based on the analysis and sear
 ## Response Format (JSON)
 ```json
 {{
+    "verdict": {{
+        "action": "continue|stop",
+        "headline": "One-line conclusion (bold, always at top)",
+        "reason": "Reassuring explanation without technical jargon"
+    }},
     "problem": {{
         "type": "{problem_type}",
         "confidence": 0.0-1.0,
@@ -54,7 +59,16 @@ Generate a comprehensive troubleshooting response based on the analysis and sear
 }}
 ```
 
-## Guidelines
+## Verdict Guidelines
+1. **action: "continue"** - Use when the issue is minor and printing can safely proceed
+   - headline example: "Looks like you can keep going for now."
+   - reason example: "Based on temperature and output flow, there's no immediate sign of failure."
+
+2. **action: "stop"** - Use when there's a risk of print failure or damage
+   - headline example: "It might be safer to stop at this point."
+   - reason example: "Continuing in this state could lead to a failed print."
+
+## General Guidelines
 1. Provide solutions in order of likelihood to fix the problem
 2. Start with easiest/least invasive solutions
 3. Be specific to the printer model when possible
@@ -84,6 +98,11 @@ SOLUTION_GENERATION_PROMPT_KO = """당신은 3D 프린팅 전문 기술자입니
 ## 응답 형식 (JSON)
 ```json
 {{
+    "verdict": {{
+        "action": "continue|stop",
+        "headline": "한 줄 결론 (굵게, 무조건 제일 위에 표시)",
+        "reason": "기술 용어 없이 안심시키는 설명"
+    }},
     "problem": {{
         "type": "{problem_type}",
         "confidence": 0.0-1.0,
@@ -117,7 +136,16 @@ SOLUTION_GENERATION_PROMPT_KO = """당신은 3D 프린팅 전문 기술자입니
 }}
 ```
 
-## 가이드라인
+## Verdict (판정) 가이드라인
+1. **action: "continue"** - 경미한 문제로 출력을 계속해도 되는 경우
+   - headline 예시: "지금은 멈출 필요 없어 보입니다."
+   - reason 예시: "온도와 출력 흐름을 보면, 지금 당장 실패로 이어질 신호는 보이지 않습니다."
+
+2. **action: "stop"** - 출력 실패나 손상 위험이 있어 중단이 권장되는 경우
+   - headline 예시: "이 상태면 중단하는 게 안전해 보입니다."
+   - reason 예시: "현재 상태로 계속 진행하면 출력이 망가질 가능성이 있어 보입니다."
+
+## 일반 가이드라인
 1. 문제 해결 가능성이 높은 순서로 솔루션 제공
 2. 가장 쉽고 비침습적인 솔루션부터 시작
 3. 가능하면 프린터 모델에 특화된 조언 제공
