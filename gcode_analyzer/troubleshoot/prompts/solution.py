@@ -76,6 +76,13 @@ Generate a comprehensive troubleshooting response based on the analysis and sear
 5. Reference search results when providing advice
 6. Consider the user's experience level (assume intermediate)
 
+## source_refs Rules (VERY IMPORTANT!)
+1. You MUST copy titles from "Search Results Summary" EXACTLY as they appear into source_refs
+2. Include 1-2 related search result titles for each solution
+3. Include 1-3 related search result titles in expert_opinion
+4. Only leave source_refs empty if there are no search results
+5. Do NOT modify or summarize titles - use them exactly as shown!
+
 Generate the troubleshooting response:
 """
 
@@ -152,6 +159,13 @@ SOLUTION_GENERATION_PROMPT_KO = """당신은 3D 프린팅 전문 기술자입니
 4. 적절한 곳에 안전 경고 포함
 5. 조언 제공 시 검색 결과 참조
 6. 사용자 경험 수준 고려 (중급 가정)
+
+## source_refs 필수 규칙 (매우 중요!)
+1. **반드시** 위 "검색 결과 요약"에 있는 제목을 **정확히 그대로** 복사해서 source_refs에 넣으세요
+2. 각 솔루션마다 관련된 검색 결과 제목을 1-2개 포함하세요
+3. expert_opinion에도 관련 검색 결과 제목을 1-3개 포함하세요
+4. 검색 결과가 없는 경우에만 source_refs를 비워두세요
+5. 제목을 임의로 수정하거나 요약하지 마세요 - 원본 그대로 사용!
 
 문제 해결 응답 생성:
 """

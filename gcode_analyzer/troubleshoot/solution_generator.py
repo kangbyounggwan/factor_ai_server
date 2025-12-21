@@ -39,7 +39,8 @@ class SolutionGenerator:
         symptom_text: str,
         image_analysis: Optional[ImageAnalysisResult],
         search_results: List[SearchResult],
-        filament_type: Optional[str] = None
+        filament_type: Optional[str] = None,
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> Dict[str, Any]:
         """
         종합 솔루션 생성
@@ -51,6 +52,7 @@ class SolutionGenerator:
             image_analysis: 이미지 분석 결과
             search_results: 웹 검색 결과
             filament_type: 필라멘트 종류
+            conversation_history: 이전 대화 히스토리
 
         Returns:
             Dict containing Problem, Solutions, ExpertOpinion
@@ -63,6 +65,15 @@ class SolutionGenerator:
 
         # 검색 결과 요약 생성
         search_summary = self._summarize_search_results(search_results)
+
+        # 대화 히스토리 요약 생성
+        conversation_context = ""
+        if conversation_history:
+            conversation_context = "\n\n## 이전 대화 컨텍스트\n"
+            for item in conversation_history[-6:]:  # 최근 6개만
+                role = "사용자" if item.get("role") == "user" else "어시스턴트"
+                content = item.get("content", "")[:200]  # 200자 제한
+                conversation_context += f"- {role}: {content}\n"
 
         # 프롬프트 구성
         prompt_template = SOLUTION_GENERATION_PROMPT_KO if self.language == "ko" else SOLUTION_GENERATION_PROMPT
@@ -77,6 +88,10 @@ class SolutionGenerator:
             filament_type=filament_type or "PLA",
             search_results_summary=search_summary
         )
+
+        # 대화 컨텍스트 추가
+        if conversation_context:
+            prompt = prompt + conversation_context
 
         try:
             response = await self.llm.ainvoke([HumanMessage(content=prompt)])

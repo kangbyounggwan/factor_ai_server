@@ -83,7 +83,8 @@ class ToolDispatcher:
 
             elif intent == ChatIntent.TROUBLESHOOT:
                 return await self._execute_troubleshoot(
-                    message, attachments, user_plan, printer_info, filament_type
+                    message, attachments, user_plan, printer_info, filament_type,
+                    conversation_history
                 )
 
             elif intent == ChatIntent.MODELLING_TEXT:
@@ -360,7 +361,8 @@ class ToolDispatcher:
         attachments: List[Attachment],
         user_plan: UserPlan,
         printer_info: Optional[Dict[str, Any]],
-        filament_type: Optional[str]
+        filament_type: Optional[str],
+        conversation_history: Optional[List[ConversationHistoryItem]] = None
     ) -> ToolResult:
         """문제 진단 실행"""
         from ..troubleshoot.image_analyzer import ImageAnalyzer
@@ -416,7 +418,15 @@ class ToolDispatcher:
                 symptom_text=enhanced_symptom
             )
 
-            # 4. 솔루션 생성
+            # 4. 솔루션 생성 (대화 히스토리 포함)
+            # ConversationHistoryItem을 dict로 변환
+            history_dicts = None
+            if conversation_history:
+                history_dicts = [
+                    {"role": item.role, "content": item.content}
+                    for item in conversation_history
+                ]
+
             generator = SolutionGenerator(language=self.language)
             solution_data = await generator.generate_solution(
                 manufacturer=manufacturer,
@@ -424,7 +434,8 @@ class ToolDispatcher:
                 symptom_text=message,
                 image_analysis=image_analysis,
                 search_results=search_results,
-                filament_type=filament_type
+                filament_type=filament_type,
+                conversation_history=history_dicts
             )
 
             # 참조 자료 추출 (각 검색 결과에서 최대 5개씩)
@@ -624,45 +635,11 @@ class ToolDispatcher:
         message: str,
         conversation_history: Optional[List[ConversationHistoryItem]] = None
     ) -> ToolResult:
-        """일반 질문 답변 (웹 검색 포함)"""
+        """일반 질문 답변 (LLM 지식 기반, 웹 검색 없음)"""
         from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
         from ..llm.client import get_llm_by_model
-        from ..troubleshoot.web_searcher import FreeSearchProvider
 
-        # 1. 웹 검색 수행
-        search_results_text = ""
-        references = []
-
-        try:
-            free_search = FreeSearchProvider()
-
-            # 3D 프린팅 관련 검색어로 변환
-            search_query = f"3D printing {message}"
-            search_results = await free_search.search(search_query)
-
-            if search_results:
-                search_results_text = "\n\n## 검색 결과\n"
-                for i, ref in enumerate(search_results[:10], 1):
-                    search_results_text += f"\n### [{i}] {ref.title}\n"
-                    search_results_text += f"URL: {ref.url}\n"
-                    if ref.snippet:
-                        search_results_text += f"내용: {ref.snippet}\n"
-                    references.append({
-                        "title": ref.title,
-                        "url": ref.url,
-                        "source": ref.source,
-                        "snippet": ref.snippet
-                    })
-
-                logger.info(f"General QA: Found {len(search_results)} search results")
-            else:
-                logger.info("General QA: No search results found")
-
-        except Exception as e:
-            logger.warning(f"General QA search failed: {e}")
-            search_results_text = "\n\n(검색 결과를 가져오지 못했습니다)\n"
-
-        # 2. LLM으로 답변 생성
+        # LLM으로 답변 생성
         model_name = self.selected_model or "gemini-2.5-flash-lite"
         llm = get_llm_by_model(
             model_name=model_name,
@@ -670,17 +647,9 @@ class ToolDispatcher:
             max_output_tokens=2048
         )
 
-        system_prompt = f"""당신은 3D 프린팅 전문가입니다.
+        system_prompt = """당신은 3D 프린팅 전문가입니다.
 사용자의 질문에 친절하고 정확하게 답변해주세요.
 답변은 간결하면서도 실용적인 정보를 포함해야 합니다.
-
-{search_results_text}
-
-## 중요 원칙
-- 위 검색 결과를 참고하여 답변하세요.
-- 검색 결과에 있는 정보를 우선적으로 활용하세요.
-- 검색 결과에 없는 정보는 일반적인 3D 프린팅 지식으로 보완할 수 있습니다.
-- 가격, 재고 등 실시간 정보는 검색 결과에 있는 경우에만 언급하세요.
 
 ## 마크다운 포맷팅 규칙 (반드시 준수)
 
@@ -748,8 +717,7 @@ class ToolDispatcher:
                 tool_name="general_qa",
                 success=True,
                 data={
-                    "answer": response.content,
-                    "references": references[:5] if references else None
+                    "answer": response.content
                 }
             )
 

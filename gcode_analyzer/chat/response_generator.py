@@ -391,19 +391,9 @@ class ResponseGenerator:
         self,
         tool_result: ToolResult
     ) -> tuple[str, List[SuggestedAction]]:
-        """일반 질문 응답 (참조 URL 포함)"""
+        """일반 질문 응답 (LLM 답변만, 참조 없음)"""
         data = tool_result.data or {}
         answer = data.get("answer", "죄송합니다, 답변을 생성할 수 없습니다.")
-        references = data.get("references", [])
-
-        # 참조 URL이 있으면 응답에 추가
-        if references:
-            answer += "\n\n---\n\n**📚 참고 자료:**\n"
-            for ref in references[:5]:
-                title = ref.get("title", "")
-                url = ref.get("url", "")
-                if title and url:
-                    answer += f"- [{title}]({url})\n"
 
         actions = [
             SuggestedAction(
