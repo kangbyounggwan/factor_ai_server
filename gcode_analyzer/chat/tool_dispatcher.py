@@ -171,7 +171,7 @@ class ToolDispatcher:
             return ToolResult(
                 tool_name="gcode_general",
                 success=False,
-                error=f"G-code 파일 디코딩 실패: {e}"
+                error="G-code 파일을 읽을 수 없습니다. 파일이 손상되었거나 지원하지 않는 형식일 수 있습니다.\n\n💡 UTF-8 인코딩된 .gcode 파일을 첨부해주세요."
             )
 
         filename = gcode_attachment.filename or "uploaded.gcode"
@@ -267,7 +267,7 @@ class ToolDispatcher:
             return ToolResult(
                 tool_name="gcode_general",
                 success=False,
-                error=f"G-code 분석 실패: {str(e)}"
+                error="G-code 파일 분석 중 문제가 발생했습니다.\n\n💡 파일이 올바른 G-code 형식인지 확인해주세요. 문제가 지속되면 다른 파일로 시도해보세요."
             )
 
     async def _execute_gcode_analysis(
@@ -306,7 +306,7 @@ class ToolDispatcher:
             return ToolResult(
                 tool_name="gcode_analysis",
                 success=False,
-                error=f"G-code 파일 디코딩 실패: {e}"
+                error="G-code 파일을 읽을 수 없습니다. 파일이 손상되었거나 지원하지 않는 형식일 수 있습니다.\n\n💡 UTF-8 인코딩된 .gcode 파일을 첨부해주세요."
             )
 
         filename = gcode_attachment.filename or f"temp_{uuid.uuid4().hex[:8]}.gcode"
@@ -345,14 +345,14 @@ class ToolDispatcher:
             return ToolResult(
                 tool_name="gcode_analysis",
                 success=False,
-                error=str(e)
+                error="G-code 파일 형식을 인식할 수 없습니다.\n\n💡 슬라이서에서 생성한 .gcode 파일인지 확인해주세요."
             )
         except Exception as e:
             logger.error(f"G-code analysis failed: {e}", exc_info=True)
             return ToolResult(
                 tool_name="gcode_analysis",
                 success=False,
-                error=f"G-code 분석 실패: {str(e)}"
+                error="G-code 파일 분석 중 문제가 발생했습니다.\n\n💡 파일이 올바른 G-code 형식인지 확인해주세요. 문제가 지속되면 다른 파일로 시도해보세요."
             )
 
     async def _execute_troubleshoot(
@@ -369,6 +369,7 @@ class ToolDispatcher:
         from ..troubleshoot.web_searcher import WebSearcher
         from ..troubleshoot.solution_generator import SolutionGenerator
         from ..troubleshoot.models import ProblemType, UserPlan as TroubleshootUserPlan
+        from ..troubleshoot.brave_image_searcher import BraveImageSearcher
 
         # 이미지 추출
         images = []
@@ -474,6 +475,50 @@ class ToolDispatcher:
 
                 return ""
 
+            # 5. 참조 이미지 검색 (Brave Image Search)
+            reference_images = None
+            try:
+                image_searcher = BraveImageSearcher()
+
+                # 대화 히스토리를 dict로 변환
+                conv_history_for_search = None
+                if conversation_history:
+                    conv_history_for_search = [
+                        {"role": item.role, "content": item.content}
+                        for item in conversation_history
+                    ]
+
+                # 컨텍스트 기반 검색 쿼리 생성
+                image_search_query = await image_searcher.generate_search_query(
+                    problem_type=problem_type,
+                    image_analysis=image_analysis,
+                    symptom_text=message,
+                    conversation_history=conv_history_for_search
+                )
+
+                # 이미지 검색 실행 (최대 10개)
+                search_images = image_searcher.search_images(image_search_query, count=10)
+
+                if search_images:
+                    reference_images = {
+                        "search_query": image_search_query,
+                        "total_count": len(search_images),
+                        "images": [
+                            {
+                                "title": img.get('title', ''),
+                                "thumbnail_url": img.get('thumbnail_url', ''),
+                                "source_url": img.get('source_url', ''),
+                                "width": img.get('width', 0),
+                                "height": img.get('height', 0)
+                            }
+                            for img in search_images
+                        ]
+                    }
+                    logger.info(f"Reference images found: {len(search_images)} images for query: {image_search_query}")
+            except Exception as e:
+                logger.warning(f"Reference image search failed: {e}")
+                reference_images = None
+
             return ToolResult(
                 tool_name="troubleshoot",
                 success=True,
@@ -504,7 +549,8 @@ class ToolDispatcher:
                             for ref in (solution_data["expert_opinion"].source_refs or [])
                         ] if solution_data["expert_opinion"].source_refs else None
                     },
-                    "references": references[:10]
+                    "references": references[:10],
+                    "reference_images": reference_images
                 }
             )
 
@@ -554,7 +600,7 @@ class ToolDispatcher:
             return ToolResult(
                 tool_name="modelling_text",
                 success=False,
-                error="3D 모델링 서비스를 사용할 수 없습니다."
+                error="먼저 로그인 후 3D 도구를 선택하여 모델을 생성해보세요.\n\n💡 사용 방법: 로그인 → 도구 선택 (3D 모델링) → 생성"
             )
         except Exception as e:
             logger.error(f"Text-to-3D failed: {e}", exc_info=True)
@@ -620,7 +666,7 @@ class ToolDispatcher:
             return ToolResult(
                 tool_name="modelling_image",
                 success=False,
-                error="3D 모델링 서비스를 사용할 수 없습니다."
+                error="먼저 로그인 후 3D 도구를 선택하여 모델을 생성해보세요.\n\n💡 사용 방법: 로그인 → 도구 선택 (3D 모델링) → 생성"
             )
         except Exception as e:
             logger.error(f"Image-to-3D failed: {e}", exc_info=True)
@@ -806,5 +852,5 @@ class ToolDispatcher:
             return ToolResult(
                 tool_name="issue_resolve",
                 success=False,
-                error=f"이슈 해결 실패: {str(e)}"
+                error="이슈 해결 방법을 찾는 중 문제가 발생했습니다.\n\n💡 잠시 후 다시 시도하거나, 문제 진단 도구를 사용하여 더 자세한 분석을 받아보세요."
             )

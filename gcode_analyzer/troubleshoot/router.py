@@ -28,8 +28,9 @@ from .models import (
     DiagnoseRequest, DiagnoseResponse,
     Problem, Solution, Reference, ExpertOpinion, TokenUsage,
     ProblemType, SearchDecision, Difficulty, PerplexitySearchResult,
-    QueryAugmentation
+    QueryAugmentation, ReferenceImage, ReferenceImages
 )
+from .brave_image_searcher import BraveImageSearcher
 from .printer_database import (
     get_all_manufacturers, get_manufacturer,
     get_series_for_manufacturer, get_search_context
@@ -282,6 +283,43 @@ async def diagnose_problem(request: DiagnoseRequest):
     )
 
     # ================================================================
+    # 4단계: 참조 이미지 검색 (Brave Image Search)
+    # ================================================================
+    reference_images = None
+    try:
+        image_searcher = BraveImageSearcher()
+
+        # 컨텍스트 기반 검색 쿼리 생성
+        image_search_query = await image_searcher.generate_search_query(
+            problem_type=problem_type,
+            image_analysis=image_analysis,
+            symptom_text=request.symptom_text
+        )
+
+        # 이미지 검색 실행 (최대 10개)
+        search_images = image_searcher.search_images(image_search_query, count=10)
+
+        if search_images:
+            reference_images = ReferenceImages(
+                search_query=image_search_query,
+                total_count=len(search_images),
+                images=[
+                    ReferenceImage(
+                        title=img.get('title', ''),
+                        thumbnail_url=img.get('thumbnail_url', ''),
+                        source_url=img.get('source_url', ''),
+                        width=img.get('width', 0),
+                        height=img.get('height', 0)
+                    )
+                    for img in search_images
+                ]
+            )
+            logger.info(f"Reference images found: {len(search_images)} images for query: {image_search_query}")
+    except Exception as e:
+        logger.warning(f"Reference image search failed: {e}")
+        reference_images = None
+
+    # ================================================================
     # 응답 구성
     # ================================================================
     # 프린터 정보 수집
@@ -336,6 +374,7 @@ async def diagnose_problem(request: DiagnoseRequest):
         problem=solution_data["problem"],
         solutions=solution_data["solutions"],
         references=references[:10],
+        reference_images=reference_images,
         expert_opinion=solution_data["expert_opinion"],
         printer_info=printer_info,
         token_usage=token_usage,

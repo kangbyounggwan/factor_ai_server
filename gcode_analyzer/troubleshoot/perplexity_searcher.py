@@ -112,7 +112,7 @@ class PerplexitySearcher:
                 query=augmented_query,
                 findings=[],
                 citations=[],
-                summary="Perplexity API를 사용할 수 없습니다.",
+                summary="외부 검색 서비스에 연결할 수 없습니다. 내부 데이터베이스를 기반으로 답변을 제공합니다.",
                 tokens_used=0
             )
 
@@ -149,7 +149,7 @@ class PerplexitySearcher:
                 query=augmented_query,
                 findings=[],
                 citations=[],
-                summary=f"검색 중 오류 발생: {str(e)}",
+                summary="외부 정보 검색 중 일시적인 문제가 발생했습니다. 내부 데이터베이스를 기반으로 답변을 제공합니다.",
                 tokens_used=0
             )
 

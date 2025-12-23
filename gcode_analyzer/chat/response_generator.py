@@ -53,7 +53,7 @@ class ResponseGenerator:
             return self._generate_modelling_response(tool_result, intent)
 
         elif intent == ChatIntent.GENERAL_QUESTION:
-            return self._generate_general_response(tool_result)
+            return self._generate_general_response(tool_result, original_message)
 
         elif intent == ChatIntent.GREETING:
             return self._generate_greeting_response()
@@ -70,9 +70,10 @@ class ResponseGenerator:
         tool_result: ToolResult
     ) -> tuple[str, List[SuggestedAction]]:
         """에러 응답 생성"""
-        error_msg = tool_result.error or "알 수 없는 오류가 발생했습니다."
+        error_msg = tool_result.error or "요청을 처리할 수 없습니다. 잠시 후 다시 시도해주세요."
 
-        response = f"죄송합니다, 요청을 처리하는 중 문제가 발생했습니다.\n\n오류: {error_msg}"
+        # "오류:" 접두사 없이 친절한 메시지로 표시
+        response = f"죄송합니다, 요청을 처리하는 중 문제가 발생했습니다.\n\n{error_msg}"
 
         actions = [
             SuggestedAction(
@@ -389,11 +390,27 @@ class ResponseGenerator:
 
     def _generate_general_response(
         self,
-        tool_result: ToolResult
+        tool_result: ToolResult,
+        original_message: str = ""
     ) -> tuple[str, List[SuggestedAction]]:
         """일반 질문 응답 (LLM 답변만, 참조 없음)"""
         data = tool_result.data or {}
         answer = data.get("answer", "죄송합니다, 답변을 생성할 수 없습니다.")
+
+        # 3D 모델링 관련 키워드 감지 시 안내 추가
+        modelling_keywords = ["만들어", "생성해", "모델링", "3d", "create", "generate", "model"]
+        if any(kw in original_message.lower() for kw in modelling_keywords):
+            modelling_guide = """
+
+---
+
+💡 **혹시 FACTOR 3D 모델링 기능을 찾고 계신가요?**
+
+텍스트나 이미지로 3D 모델을 생성하려면:
+1. **로그인** 후
+2. 좌측 **도구 선택**에서 **3D 모델링** 선택
+3. 원하는 모델을 설명하거나 이미지를 첨부해주세요!"""
+            answer += modelling_guide
 
         actions = [
             SuggestedAction(

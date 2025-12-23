@@ -25,6 +25,7 @@ class IntentClassifier:
     """
 
     # 키워드 기반 분류 (fallback용)
+    # 주의: MODELLING은 키워드로 분류하지 않음 (도구 선택 필수)
     KEYWORD_PATTERNS = {
         ChatIntent.GCODE_ANALYSIS: [
             r"g-?code", r"분석", r"analyze", r"파싱", r"parse", r"검사"
@@ -34,9 +35,8 @@ class IntentClassifier:
             r"problem", r"issue", r"error", r"fix", r"not working",
             r"안\s*붙", r"떨어", r"스트링", r"뒤틀", r"막힘"
         ],
-        ChatIntent.MODELLING_TEXT: [
-            r"만들어", r"생성", r"모델링", r"3d.*만", r"create", r"generate", r"model"
-        ],
+        # MODELLING_TEXT 제거: 도구 선택 없이 "만들어줘"만으로 3D 모델링 실행 방지
+        # 3D 모델링은 반드시 UI에서 도구를 선택해야 함
         ChatIntent.GREETING: [
             r"^안녕", r"^하이", r"^hello", r"^hi\b", r"반가"
         ],

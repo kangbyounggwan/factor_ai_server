@@ -154,6 +154,22 @@ class QueryAugmentation(BaseModel):
     search_decision: str = Field("recommended", description="검색 필요 여부 (not_needed, recommended, required)")
 
 
+class ReferenceImage(BaseModel):
+    """참조 이미지 (문제 사례 이미지)"""
+    title: str = Field(..., description="이미지 제목")
+    thumbnail_url: str = Field(..., description="썸네일 이미지 URL")
+    source_url: str = Field(..., description="원본 이미지/페이지 URL")
+    width: int = Field(0, description="이미지 너비")
+    height: int = Field(0, description="이미지 높이")
+
+
+class ReferenceImages(BaseModel):
+    """참조 이미지 검색 결과"""
+    search_query: str = Field("", description="사용된 검색 쿼리")
+    total_count: int = Field(0, description="검색된 이미지 수")
+    images: List[ReferenceImage] = Field(default_factory=list, description="참조 이미지 목록")
+
+
 class DiagnoseResponse(BaseModel):
     """진단 응답"""
     diagnosis_id: str = Field(..., description="진단 ID")
@@ -161,6 +177,7 @@ class DiagnoseResponse(BaseModel):
     problem: Problem = Field(..., description="진단된 문제")
     solutions: List[Solution] = Field(..., description="해결책 목록")
     references: List[Reference] = Field(default_factory=list, description="참조 자료")
+    reference_images: Optional[ReferenceImages] = Field(None, description="참조 이미지 (유사 문제 사례)")
     expert_opinion: ExpertOpinion = Field(..., description="전문가 의견")
     printer_info: Dict[str, Any] = Field(default_factory=dict, description="프린터 정보")
     token_usage: TokenUsage = Field(default_factory=TokenUsage, description="토큰 사용량")
