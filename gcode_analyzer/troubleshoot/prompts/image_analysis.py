@@ -70,18 +70,20 @@ Analyze the provided image and identify any 3D printing problems visible.
 ```
 
 ## Guidelines
-1. Only report problems you can clearly see in the image
-2. Confidence score: 0.0 (uncertain) to 1.0 (certain)
-3. List problems in order of severity/prominence
-4. Be specific about visual evidence
-5. If image quality is poor, mention it in observations
-6. If no clear problems are visible, return empty detected_problems
-7. **augmented_query**: Create a detailed English search query that includes:
+1. **Prioritize user-described problems**: If user mentions "warping", "lifting", "curling edges", etc., focus analysis on those issues
+2. Report problems visible in the image, but prioritize evidence matching user's description
+3. Confidence score: 0.0 (uncertain) to 1.0 (certain)
+4. List problems in order of severity/prominence
+5. Be specific about visual evidence
+6. If image quality is poor, mention it in observations
+7. If no clear problems are visible, return empty detected_problems
+8. **When user description differs from image analysis**: If user explicitly mentioned a problem and image shows evidence of it, prioritize user's description
+9. **augmented_query**: Create a detailed English search query that includes:
    - The detected problem type
    - Specific visual symptoms observed
    - Potential related causes (e.g., wet filament, wrong temperature, retraction issues)
    - Relevant keywords for effective web search
-8. **follow_up_questions**: Generate 2-3 questions to ask the user for more accurate diagnosis:
+10. **follow_up_questions**: Generate 2-3 questions to ask the user for more accurate diagnosis:
    - Ask about settings (temperature, speed, retraction)
    - Ask about environment (humidity, filament storage)
    - Ask about recent changes
@@ -182,18 +184,20 @@ IMAGE_ANALYSIS_PROMPT_KO = """당신은 3D 프린팅 전문 기술자입니다. 
 ```
 
 ## 가이드라인
-1. 이미지에서 명확히 보이는 문제만 보고
-2. 확신도 점수: 0.0 (불확실) ~ 1.0 (확실)
-3. 심각도/두드러진 순서로 문제 나열
-4. 시각적 증거에 대해 구체적으로 설명
-5. 이미지 품질이 낮으면 관찰 사항에 언급
-6. 명확한 문제가 보이지 않으면 detected_problems를 빈 배열로 반환
-7. **augmented_query**: 상세한 영어 검색 쿼리 생성 (필수):
+1. **사용자가 설명한 문제를 최우선으로 고려**: 사용자가 "양쪽 들뜸", "워핑", "휨" 등을 언급했다면 해당 문제를 중심으로 분석
+2. 이미지에서 명확히 보이는 문제를 보고하되, 사용자 설명과 일치하는 증거를 우선 찾기
+3. 확신도 점수: 0.0 (불확실) ~ 1.0 (확실)
+4. 심각도/두드러진 순서로 문제 나열
+5. 시각적 증거에 대해 구체적으로 설명
+6. 이미지 품질이 낮으면 관찰 사항에 언급
+7. 명확한 문제가 보이지 않으면 detected_problems를 빈 배열로 반환
+8. **사용자 설명과 이미지 분석 결과가 다를 경우**: 사용자가 명시적으로 언급한 문제가 이미지에서도 확인 가능하면 사용자 설명을 우선
+9. **augmented_query**: 상세한 영어 검색 쿼리 생성 (필수):
    - 감지된 문제 유형
    - 관찰된 구체적 시각적 증상
    - 잠재적 관련 원인 (예: 습기 찬 필라멘트, 온도 문제, 리트랙션 문제)
    - 효과적인 웹 검색을 위한 관련 키워드
-8. **follow_up_questions**: 정확한 진단을 위해 사용자에게 물어볼 질문 2-3개 생성:
+10. **follow_up_questions**: 정확한 진단을 위해 사용자에게 물어볼 질문 2-3개 생성:
    - 설정 관련 (온도, 속도, 리트랙션)
    - 환경 관련 (습도, 필라멘트 보관)
    - 최근 변경 사항

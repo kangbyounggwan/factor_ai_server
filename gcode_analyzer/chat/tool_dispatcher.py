@@ -391,11 +391,14 @@ class ToolDispatcher:
         troubleshoot_plan = plan_mapping.get(user_plan, TroubleshootUserPlan.FREE)
 
         try:
-            # 1. 이미지 분석 (있는 경우)
+            # 1. 이미지 분석 (있는 경우) - 사용자 메시지를 함께 전달하여 문맥 파악
             image_analysis = None
             if images:
                 analyzer = ImageAnalyzer(language=self.language)
-                image_analysis = await analyzer.analyze_images(images)
+                image_analysis = await analyzer.analyze_images(
+                    images=images,
+                    symptom_text=message  # 사용자가 입력한 증상 텍스트 전달
+                )
 
             # 2. 문제 유형 및 구체적 증상 결정
             if image_analysis and image_analysis.detected_problems:

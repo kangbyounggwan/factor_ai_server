@@ -84,7 +84,8 @@
       "Bash(python test_gemini3.py:*)",
       "Bash(python test_all_models.py:*)",
       "Bash(.venvScriptspython.exe test_brave_api.py)",
-      "Bash(.venv/Scripts/python.exe test_brave_api.py)"
+      "Bash(.venv/Scripts/python.exe test_brave_api.py)",
+      "Bash(pip show:*)"
     ],
     "deny": [],
     "ask": []

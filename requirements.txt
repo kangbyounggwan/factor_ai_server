@@ -1,20 +1,52 @@
-fastapi==0.115.0
-uvicorn[standard]==0.31.0
-httpx==0.28.1
-python-multipart==0.0.9
-python-dotenv==1.0.1
-pydantic>=2.7.4
-trimesh==4.5.3
-supabase==2.24.0
-websockets==15.0.1
-PyJWT[crypto]>=2.10.1
-paho-mqtt==1.6.1
-openai>=1.0.0
-opencv-python>=4.8.0
-numpy>=1.24.0
+# FastAPI & Web Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.31.0
+httpx>=0.28.1
+python-multipart>=0.0.9
+starlette>=0.38.0
+websockets>=15.0.1
 
-# G-code Analyzer (LangGraph + Gemini)
+# Environment & Configuration
+python-dotenv>=1.0.1
+pydantic>=2.7.4
+
+# Supabase (Database & Auth)
+supabase>=2.24.0
+PyJWT[crypto]>=2.10.1
+
+# MQTT (IoT Communication)
+paho-mqtt>=1.6.1
+
+# LLM & AI
+openai>=1.0.0
+langchain>=1.0.0
+langchain-core>=1.0.0
+langchain-google-genai>=4.0.0
+langchain-openai>=1.0.0
 langgraph>=1.0.0
-langchain>=0.3.0
-langchain-core>=0.3.0
-langchain-google-genai>=2.0.0
+google-generativeai>=0.8.0
+
+# Web Search APIs
+tavily-python>=0.7.0
+ddgs>=9.0.0
+wikipedia>=1.4.0
+
+# Image Processing
+opencv-python>=4.8.0
+pillow>=10.0.0
+
+# 3D Model Processing
+trimesh>=4.5.0
+
+# Data Processing
+numpy>=1.24.0
+tiktoken>=0.5.0
+
+# Async Support
+aiohttp>=3.9.0
+aiofiles>=23.0.0
+
+# Utilities
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
