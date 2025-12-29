@@ -2,7 +2,7 @@
 응답 생성기 - 도구 결과를 자연어 응답으로 변환
 """
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List
 
 from .models import ChatIntent, ToolResult, SuggestedAction
 
@@ -16,6 +16,304 @@ class ResponseGenerator:
 
     def __init__(self, language: str = "ko"):
         self.language = language
+        self._init_labels()
+
+    def _init_labels(self):
+        """언어별 레이블 초기화"""
+        if self.language == "en":
+            self.labels = {
+                # 공통
+                "error_sorry": "Sorry, there was a problem processing your request.",
+                "retry": "Retry",
+                "what_can_i_help": "How can I help you?",
+
+                # G-code 분석
+                "gcode_analysis_started": "G-code Analysis Started!",
+                "file": "File",
+                "status": "Status",
+                "segments_ready_llm_analyzing": "Segments extracted, LLM analysis in progress...",
+                "detected_info": "Detected Information",
+                "total_layers": "Total layers",
+                "extrusion_paths": "Extrusion paths",
+                "travel_paths": "Travel paths",
+                "viewer_hint": "You can view layers in the 3D viewer.",
+                "analysis_complete_hint": "Once the detailed analysis is complete, I'll show you the quality score and issues!",
+                "check_status": "Check Analysis Status",
+                "explore_layers": "Explore Layers",
+
+                # G-code 동기 분석
+                "gcode_analysis_complete": "G-code Analysis Complete!",
+                "quality_score": "Quality Score",
+                "basic_info": "Basic Information",
+                "estimated_print_time": "Estimated print time",
+                "filament_usage": "Filament usage",
+                "layer_height": "Layer height",
+                "temperature_settings": "Temperature Settings",
+                "nozzle": "Nozzle",
+                "bed": "Bed",
+                "issues_found": "Issues Found",
+                "and_more": "... and {count} more",
+                "view_detail": "View Detailed Analysis",
+                "download_patched": "Download Patched G-code",
+                "unknown": "Unknown",
+
+                # 문제 진단
+                "problem_analysis_result": "Problem Analysis Result",
+                "detected_problem": "Detected Problem",
+                "confidence": "Confidence",
+                "recommended_solutions": "Recommended Solutions",
+                "difficulty": "Difficulty",
+                "estimated_time": "Est. time",
+                "source": "Source",
+                "expert_opinion": "Expert Opinion",
+                "prevention_tips": "Prevention Tips",
+                "references": "References",
+                "detailed_diagnosis": "More Detailed Diagnosis",
+                "new_troubleshoot": "Troubleshoot Another Issue",
+
+                # 문제 유형
+                "problem_types": {
+                    "bed_adhesion": "First Layer Adhesion Issue",
+                    "stringing": "Stringing/Oozing",
+                    "warping": "Warping/Curling",
+                    "layer_shifting": "Layer Shifting",
+                    "under_extrusion": "Under-extrusion",
+                    "over_extrusion": "Over-extrusion",
+                    "clogging": "Nozzle Clogging",
+                    "surface_quality": "Surface Quality Issue",
+                    "ghosting": "Ghosting/Ringing",
+                    "z_banding": "Z-Banding",
+                    "blob": "Blobs/Zits",
+                    "layer_separation": "Layer Separation",
+                    "elephant_foot": "Elephant Foot",
+                    "bridging_issue": "Bridging Issue",
+                    "overhang_issue": "Overhang Issue",
+                    "bed_leveling": "Bed Leveling Issue",
+                    "nozzle_damage": "Nozzle Damage",
+                    "extruder_skip": "Extruder Skipping",
+                    "belt_tension": "Belt Tension Issue",
+                    "heating_failure": "Heating Failure",
+                    "unknown": "Unidentified Issue"
+                },
+
+                # 3D 모델링
+                "model_generation_complete": "3D Model Generation Complete!",
+                "model_generation_started": "3D Model Generation Started!",
+                "type": "Type",
+                "prompt": "Prompt",
+                "model_success": "Model has been successfully generated!",
+                "model_generating": "Generating your model... (takes about 2-3 minutes)",
+                "model_notify": "I'll notify you when it's done!",
+                "download_glb": "Download GLB",
+                "download_stl": "Download STL",
+                "convert_to_gcode": "Convert to G-code",
+                "check_progress": "Check Progress",
+
+                # 이슈 해결
+                "no_issue": "No Issue",
+                "false_positive": "false positive",
+                "analysis_result": "Analysis Result",
+                "reason": "Reason",
+                "code_normal": "This code is working correctly. It's likely intended behavior by the slicer.",
+                "dismiss_issue": "Dismiss Issue",
+                "issue_resolution": "Issue Resolution",
+                "severity": "Severity",
+                "severity_levels": {
+                    "low": "Low",
+                    "medium": "Medium",
+                    "high": "High",
+                    "info": "Info"
+                },
+                "problem_cause": "Problem Cause",
+                "print_impact": "Print Impact",
+                "quality": "Quality",
+                "failure_risk": "Failure risk",
+                "solution_method": "Solution Method",
+                "code_fix": "Code Fix",
+                "original": "Original",
+                "fixed": "Fixed",
+                "copy_fix": "Copy Fixed Code",
+                "view_other_issues": "View Other Issues",
+
+                # 인사 & 도움말
+                "greeting": "Hello! I'm your 3D printing assistant.",
+                "how_can_i_help": "How can I help you?",
+                "capabilities_title": "What I can help with:",
+                "cap_gcode": "**G-code Analysis** - Analyze G-code files and find issues",
+                "cap_troubleshoot": "**Printer Troubleshooting** - Analyze failed print images or symptoms and suggest solutions",
+                "cap_modelling": "**3D Modelling** - Create 3D models from text or images",
+                "cap_qa": "**Q&A** - Answer questions about 3D printing",
+                "gcode_analysis": "G-code Analysis",
+                "troubleshoot": "Troubleshoot",
+                "modelling_3d": "3D Modelling",
+
+                "help_title": "How to Use",
+                "help_gcode_title": "1. G-code Analysis",
+                "help_gcode_desc": "- Attach a G-code file and say \"analyze this\"\n- I'll analyze print time, filament usage, and potential issues",
+                "help_troubleshoot_title": "2. Printer Troubleshooting",
+                "help_troubleshoot_desc": "- Attach a photo of a failed print or describe the symptoms\n- AI will analyze the problem and suggest solutions",
+                "help_modelling_title": "3. 3D Modelling",
+                "help_modelling_desc": "- **Text-to-3D:** \"Create a cute cat figurine\"\n- **Image-to-3D:** Attach an image and say \"make a 3D model from this\"",
+                "help_general_title": "4. General Questions",
+                "help_general_desc": "- Ask anything about 3D printing like PLA vs PETG differences, optimal temperatures, etc.!",
+                "start_gcode": "Start G-code Analysis",
+                "start_troubleshoot": "Start Troubleshooting",
+                "start_modelling": "Start 3D Modelling",
+
+                # 일반 응답
+                "follow_up": "Ask a Follow-up Question",
+                "select_tool_gcode": "Do Detailed Analysis",
+                "modelling_hint_title": "Looking for FACTOR 3D modelling feature?",
+                "modelling_hint_steps": "To create 3D models from text or images:\n1. **Log in**\n2. Select **3D Modelling** from **Tool Selection** on the left\n3. Describe or attach an image of the model you want!",
+                "analyzing": "Analyzing...",
+            }
+        else:
+            self.labels = {
+                # 공통
+                "error_sorry": "죄송합니다, 요청을 처리하는 중 문제가 발생했습니다.",
+                "retry": "다시 시도",
+                "what_can_i_help": "무엇을 도와드릴까요?",
+
+                # G-code 분석
+                "gcode_analysis_started": "G-code 분석 시작!",
+                "file": "파일",
+                "status": "상태",
+                "segments_ready_llm_analyzing": "세그먼트 추출 완료, LLM 분석 진행 중...",
+                "detected_info": "감지된 정보",
+                "total_layers": "총 레이어",
+                "extrusion_paths": "압출 경로",
+                "travel_paths": "이동 경로",
+                "viewer_hint": "3D 뷰어에서 레이어를 확인할 수 있습니다.",
+                "analysis_complete_hint": "상세 분석이 완료되면 품질 점수와 이슈를 알려드릴게요!",
+                "check_status": "분석 상태 확인",
+                "explore_layers": "레이어 탐색",
+
+                # G-code 동기 분석
+                "gcode_analysis_complete": "G-code 분석 완료!",
+                "quality_score": "품질 점수",
+                "basic_info": "기본 정보",
+                "estimated_print_time": "예상 출력 시간",
+                "filament_usage": "필라멘트 사용량",
+                "layer_height": "레이어 높이",
+                "temperature_settings": "온도 설정",
+                "nozzle": "노즐",
+                "bed": "베드",
+                "issues_found": "발견된 이슈",
+                "and_more": "... 외 {count}개",
+                "view_detail": "상세 분석 보기",
+                "download_patched": "수정된 G-code 다운로드",
+                "unknown": "알 수 없음",
+
+                # 문제 진단
+                "problem_analysis_result": "문제 분석 결과",
+                "detected_problem": "감지된 문제",
+                "confidence": "확신도",
+                "recommended_solutions": "추천 해결 방법",
+                "difficulty": "난이도",
+                "estimated_time": "예상 시간",
+                "source": "출처",
+                "expert_opinion": "전문가 의견",
+                "prevention_tips": "예방 팁",
+                "references": "참고 자료",
+                "detailed_diagnosis": "더 자세한 진단",
+                "new_troubleshoot": "다른 문제 상담",
+
+                # 문제 유형
+                "problem_types": {
+                    "bed_adhesion": "첫 레이어 접착 불량",
+                    "stringing": "스트링/거미줄",
+                    "warping": "뒤틀림/휨",
+                    "layer_shifting": "레이어 쉬프트",
+                    "under_extrusion": "압출 부족",
+                    "over_extrusion": "과압출",
+                    "clogging": "노즐 막힘",
+                    "surface_quality": "표면 품질 문제",
+                    "ghosting": "고스팅/링잉",
+                    "z_banding": "Z 밴딩",
+                    "blob": "블롭/점",
+                    "layer_separation": "레이어 분리",
+                    "elephant_foot": "코끼리 발",
+                    "bridging_issue": "브리징 문제",
+                    "overhang_issue": "오버행 문제",
+                    "bed_leveling": "베드 레벨링 문제",
+                    "nozzle_damage": "노즐 손상",
+                    "extruder_skip": "익스트루더 스킵",
+                    "belt_tension": "벨트 텐션 문제",
+                    "heating_failure": "예열 실패",
+                    "unknown": "미확인 문제"
+                },
+
+                # 3D 모델링
+                "model_generation_complete": "3D 모델 생성 완료!",
+                "model_generation_started": "3D 모델 생성 시작!",
+                "type": "타입",
+                "prompt": "프롬프트",
+                "model_success": "모델이 성공적으로 생성되었습니다!",
+                "model_generating": "모델을 생성 중입니다... (약 2-3분 소요)",
+                "model_notify": "완료되면 알려드릴게요!",
+                "download_glb": "GLB 다운로드",
+                "download_stl": "STL 다운로드",
+                "convert_to_gcode": "G-code로 변환",
+                "check_progress": "진행 상황 확인",
+
+                # 이슈 해결
+                "no_issue": "문제 없음",
+                "false_positive": "오탐(False Positive)",
+                "analysis_result": "분석 결과",
+                "reason": "이유",
+                "code_normal": "이 코드는 정상적으로 작동합니다. 슬라이서가 의도한 동작일 가능성이 높습니다.",
+                "dismiss_issue": "이슈 무시하기",
+                "issue_resolution": "이슈 해결 방법",
+                "severity": "심각도",
+                "severity_levels": {
+                    "low": "낮음",
+                    "medium": "보통",
+                    "high": "높음",
+                    "info": "참고"
+                },
+                "problem_cause": "문제 원인",
+                "print_impact": "출력 영향",
+                "quality": "품질",
+                "failure_risk": "실패 위험",
+                "solution_method": "해결 방법",
+                "code_fix": "코드 수정",
+                "original": "원본",
+                "fixed": "수정",
+                "copy_fix": "수정 코드 복사",
+                "view_other_issues": "다른 이슈 확인",
+
+                # 인사 & 도움말
+                "greeting": "안녕하세요! 3D 프린팅 어시스턴트입니다.",
+                "how_can_i_help": "무엇을 도와드릴까요?",
+                "capabilities_title": "제가 도와드릴 수 있는 것들:",
+                "cap_gcode": "🔍 **G-code 분석** - G-code 파일을 분석하고 문제점을 찾아드려요",
+                "cap_troubleshoot": "🔧 **프린터 문제 진단** - 출력 실패 이미지나 증상을 분석해 해결책을 제안해요",
+                "cap_modelling": "🎨 **3D 모델링** - 텍스트나 이미지로 3D 모델을 만들어드려요",
+                "cap_qa": "❓ **질문 답변** - 3D 프린팅 관련 질문에 답변해드려요",
+                "gcode_analysis": "G-code 분석",
+                "troubleshoot": "문제 진단",
+                "modelling_3d": "3D 모델링",
+
+                "help_title": "사용 방법",
+                "help_gcode_title": "1. G-code 분석",
+                "help_gcode_desc": "- G-code 파일을 첨부하고 \"분석해줘\"라고 말씀해주세요\n- 출력 시간, 필라멘트 사용량, 잠재적 문제점을 분석해드려요",
+                "help_troubleshoot_title": "2. 프린터 문제 진단",
+                "help_troubleshoot_desc": "- 실패한 출력물 사진을 첨부하거나 증상을 설명해주세요\n- AI가 문제를 분석하고 해결책을 제안해드려요",
+                "help_modelling_title": "3. 3D 모델링",
+                "help_modelling_desc": "- **Text-to-3D:** \"귀여운 고양이 피규어 만들어줘\"\n- **Image-to-3D:** 이미지를 첨부하고 \"이걸로 3D 모델 만들어줘\"",
+                "help_general_title": "4. 일반 질문",
+                "help_general_desc": "- PLA vs PETG 차이, 최적 온도 설정 등 무엇이든 물어보세요!",
+                "start_gcode": "G-code 분석 시작",
+                "start_troubleshoot": "문제 진단 시작",
+                "start_modelling": "3D 모델링 시작",
+
+                # 일반 응답
+                "follow_up": "관련 질문하기",
+                "select_tool_gcode": "상세 분석하기",
+                "modelling_hint_title": "혹시 FACTOR 3D 모델링 기능을 찾고 계신가요?",
+                "modelling_hint_steps": "텍스트나 이미지로 3D 모델을 생성하려면:\n1. **로그인** 후\n2. 좌측 **도구 선택**에서 **3D 모델링** 선택\n3. 원하는 모델을 설명하거나 이미지를 첨부해주세요!",
+                "analyzing": "분석 중...",
+            }
 
     def generate(
         self,
@@ -62,7 +360,7 @@ class ResponseGenerator:
             return self._generate_help_response()
 
         else:
-            return "무엇을 도와드릴까요?", []
+            return self.labels["what_can_i_help"], []
 
     def _generate_error_response(
         self,
@@ -70,14 +368,14 @@ class ResponseGenerator:
         tool_result: ToolResult
     ) -> tuple[str, List[SuggestedAction]]:
         """에러 응답 생성"""
-        error_msg = tool_result.error or "요청을 처리할 수 없습니다. 잠시 후 다시 시도해주세요."
+        default_error = "Unable to process your request. Please try again later." if self.language == "en" else "요청을 처리할 수 없습니다. 잠시 후 다시 시도해주세요."
+        error_msg = tool_result.error or default_error
 
-        # "오류:" 접두사 없이 친절한 메시지로 표시
-        response = f"죄송합니다, 요청을 처리하는 중 문제가 발생했습니다.\n\n{error_msg}"
+        response = f"{self.labels['error_sorry']}\n\n{error_msg}"
 
         actions = [
             SuggestedAction(
-                label="다시 시도",
+                label=self.labels["retry"],
                 action="retry",
                 data={"intent": intent.value}
             )
@@ -115,6 +413,7 @@ class ResponseGenerator:
         클라이언트가 세그먼트를 즉시 렌더링하고 폴링으로 진행률을 추적할 수 있도록 합니다.
         """
         data = tool_result.data or {}
+        L = self.labels
 
         filename = data.get("filename", "G-code")
         layer_count = data.get("layer_count", 0)
@@ -128,27 +427,27 @@ class ResponseGenerator:
         total_extrusions = sum(layer.get("extrusionCount", 0) for layer in layers_data)
         total_travels = sum(layer.get("travelCount", 0) for layer in layers_data)
 
-        response = f"""**G-code 분석 시작!**
+        response = f"""**{L['gcode_analysis_started']}**
 
-**파일:** {filename}
-**상태:** 세그먼트 추출 완료, LLM 분석 진행 중...
+**{L['file']}:** {filename}
+**{L['status']}:** {L['segments_ready_llm_analyzing']}
 
-**감지된 정보:**
-- 총 레이어: **{layer_count}개**
-- 압출 경로: {total_extrusions:,}개
-- 이동 경로: {total_travels:,}개
+**{L['detected_info']}:**
+- {L['total_layers']}: **{layer_count}**
+- {L['extrusion_paths']}: {total_extrusions:,}
+- {L['travel_paths']}: {total_travels:,}
 
-3D 뷰어에서 레이어를 확인할 수 있습니다.
-상세 분석이 완료되면 품질 점수와 이슈를 알려드릴게요!"""
+{L['viewer_hint']}
+{L['analysis_complete_hint']}"""
 
         actions = [
             SuggestedAction(
-                label="분석 상태 확인",
+                label=L["check_status"],
                 action="check_status",
                 data={"analysis_id": analysis_id}
             ),
             SuggestedAction(
-                label="레이어 탐색",
+                label=L["explore_layers"],
                 action="explore_layers",
                 data={"analysis_id": analysis_id}
             )
@@ -163,6 +462,7 @@ class ResponseGenerator:
         """G-code 동기 분석 응답 (하위 호환용)"""
         data = tool_result.data or {}
         summary = data.get("summary", {})
+        L = self.labels
 
         # 기본 정보 추출
         filename = data.get("filename", "G-code")
@@ -182,39 +482,39 @@ class ResponseGenerator:
 
         # 출력 시간
         time_info = summary.get("print_time", {})
-        print_time = time_info.get("formatted", "알 수 없음")
+        print_time = time_info.get("formatted", L["unknown"])
 
         # 이슈 정보
         issues = data.get("issues", [])
 
-        response = f"""**G-code 분석 완료!** 📊
+        response = f"""**{L['gcode_analysis_complete']}** 📊
 
-**파일:** {filename}
-**품질 점수:** {quality_score}/100
+**{L['file']}:** {filename}
+**{L['quality_score']}:** {quality_score}/100
 
-**📋 기본 정보:**
-- 예상 출력 시간: {print_time}
-- 필라멘트 사용량: {extrusion_m:.1f}m
-- 총 레이어: {layers.get('total_layers', 0)}개
-- 레이어 높이: {layers.get('layer_height_mm', 0)}mm
+**📋 {L['basic_info']}:**
+- {L['estimated_print_time']}: {print_time}
+- {L['filament_usage']}: {extrusion_m:.1f}m
+- {L['total_layers']}: {layers.get('total_layers', 0)}
+- {L['layer_height']}: {layers.get('layer_height_mm', 0)}mm
 
-**🌡️ 온도 설정:**
-- 노즐: {nozzle.get('max', 0)}°C
-- 베드: {bed.get('max', 0)}°C
+**🌡️ {L['temperature_settings']}:**
+- {L['nozzle']}: {nozzle.get('max', 0)}°C
+- {L['bed']}: {bed.get('max', 0)}°C
 """
 
         if issues:
-            response += f"\n**⚠️ 발견된 이슈 ({len(issues)}개):**\n"
+            response += f"\n**⚠️ {L['issues_found']} ({len(issues)}):**\n"
             for i, issue in enumerate(issues[:3], 1):
                 issue_desc = issue.get("description", issue.get("message", ""))
                 response += f"{i}. {issue_desc}\n"
 
             if len(issues) > 3:
-                response += f"... 외 {len(issues) - 3}개\n"
+                response += L["and_more"].format(count=len(issues) - 3) + "\n"
 
         actions = [
             SuggestedAction(
-                label="상세 분석 보기",
+                label=L["view_detail"],
                 action="view_analysis_detail",
                 data={"analysis_id": data.get("analysis_id")}
             )
@@ -222,7 +522,7 @@ class ResponseGenerator:
 
         if issues:
             actions.append(SuggestedAction(
-                label="수정된 G-code 다운로드",
+                label=L["download_patched"],
                 action="download_patched_gcode",
                 data={"analysis_id": data.get("analysis_id")}
             ))
@@ -235,89 +535,76 @@ class ResponseGenerator:
     ) -> tuple[str, List[SuggestedAction]]:
         """문제 진단 응답 생성"""
         data = tool_result.data or {}
+        L = self.labels
 
         problem = data.get("problem", {})
         solutions = data.get("solutions", [])
         expert = data.get("expert_opinion", {})
-        references = data.get("references", [])
 
-        # 문제 유형 한글 매핑
-        problem_type_ko = {
-            "bed_adhesion": "첫 레이어 접착 불량",
-            "stringing": "스트링/거미줄",
-            "warping": "뒤틀림/휨",
-            "layer_shifting": "레이어 쉬프트",
-            "under_extrusion": "압출 부족",
-            "over_extrusion": "과압출",
-            "clogging": "노즐 막힘",
-            "unknown": "미확인 문제"
-        }
-
+        # 문제 유형 매핑
         problem_type = problem.get("type", "unknown")
-        problem_name = problem_type_ko.get(problem_type, problem_type)
+        problem_name = L["problem_types"].get(problem_type, problem_type)
         confidence = problem.get("confidence", 0) * 100
 
-        response = f"""**문제 분석 결과** 🔍
+        response = f"""**{L['problem_analysis_result']}** 🔍
 
-**감지된 문제:** {problem_name} (확신도: {confidence:.0f}%)
+**{L['detected_problem']}:** {problem_name} ({L['confidence']}: {confidence:.0f}%)
 {problem.get('description', '')}
 
 """
 
         if solutions:
-            response += "**🔧 추천 해결 방법:**\n\n"
+            response += f"**🔧 {L['recommended_solutions']}:**"
+            response += "\n\n"
             for i, sol in enumerate(solutions[:3], 1):
-                response += f"**{i}. {sol.get('title', '')}**\n"
                 difficulty = sol.get('difficulty', 'medium')
                 time_est = sol.get('estimated_time', '')
 
-                response += f"   난이도: {difficulty}"
+                # 제목과 난이도/시간
+                response += f"**{i}. {sol.get('title', '')}** {L['difficulty']}: {difficulty}"
                 if time_est:
-                    response += f" | 예상 시간: {time_est}"
-                response += "\n"
+                    response += f" | {L['estimated_time']}: {time_est}"
+                response += "\n\n"
 
                 steps = sol.get('steps', [])
                 for j, step in enumerate(steps[:5], 1):
-                    response += f"   {j}. {step}\n"
+                    response += f"{j}. {step}\n"
 
                 # 솔루션 출처 표시
                 source_refs = sol.get('source_refs', [])
                 if source_refs:
                     ref_links = [f"[{r.get('title', '')}]({r.get('url', '')})" for r in source_refs if r.get('url')]
                     if ref_links:
-                        response += f"   📎 출처: {', '.join(ref_links[:2])}\n"
+                        response += f"\n📎 {L['source']}: {', '.join(ref_links[:2])}"
 
-                response += "\n"
+                response += "\n\n"
 
         if expert.get("summary"):
-            response += f"**💡 전문가 의견:**\n{expert['summary']}\n"
+            response += f"**💡 {L['expert_opinion']}:**\n{expert['summary']}\n"
             # 전문가 의견 출처 표시
             expert_refs = expert.get('source_refs', [])
             if expert_refs:
                 ref_links = [f"[{r.get('title', '')}]({r.get('url', '')})" for r in expert_refs if r.get('url')]
                 if ref_links:
-                    response += f"📎 출처: {', '.join(ref_links[:3])}\n"
+                    response += f"📎 {L['source']}: {', '.join(ref_links[:3])}\n"
             response += "\n"
 
         if expert.get("prevention_tips"):
-            response += "**예방 팁:**\n"
+            response += f"**{L['prevention_tips']}:**\n"
             for tip in expert["prevention_tips"][:3]:
                 response += f"- {tip}\n"
             response += "\n"
 
-        if references:
-            response += "**📚 참고 자료:**\n"
-            for ref in references[:10]:
-                response += f"- [{ref.get('title', '')}]({ref.get('url', '')})\n"
+        # references는 프론트엔드에서 별도 UI 컴포넌트로 렌더링하므로 본문에서 제외
 
         actions = [
             SuggestedAction(
-                label="더 자세한 진단",
+                label=L["detailed_diagnosis"],
                 action="detailed_diagnosis",
                 data={"problem_type": problem_type}
             ),
             SuggestedAction(
-                label="다른 문제 상담",
+                label=L["new_troubleshoot"],
                 action="new_troubleshoot",
                 data={}
             )
@@ -332,23 +619,24 @@ class ResponseGenerator:
     ) -> tuple[str, List[SuggestedAction]]:
         """3D 모델링 응답 생성"""
         data = tool_result.data or {}
+        L = self.labels
 
         task_type = "Image-to-3D" if intent == ChatIntent.MODELLING_IMAGE else "Text-to-3D"
         prompt = data.get("prompt", "")
         status = data.get("status", "processing")
 
         if status == "completed" or data.get("glb_url"):
-            response = f"""**3D 모델 생성 완료!** 🎨
+            response = f"""**{L['model_generation_complete']}** 🎨
 
-**타입:** {task_type}
-**프롬프트:** {prompt}
+**{L['type']}:** {task_type}
+**{L['prompt']}:** {prompt}
 
-모델이 성공적으로 생성되었습니다!
+{L['model_success']}
 """
 
             actions = [
                 SuggestedAction(
-                    label="GLB 다운로드",
+                    label=L["download_glb"],
                     action="download_glb",
                     data={"url": data.get("glb_url")}
                 )
@@ -356,31 +644,31 @@ class ResponseGenerator:
 
             if data.get("stl_url"):
                 actions.append(SuggestedAction(
-                    label="STL 다운로드",
+                    label=L["download_stl"],
                     action="download_stl",
                     data={"url": data.get("stl_url")}
                 ))
 
             actions.append(SuggestedAction(
-                label="G-code로 변환",
+                label=L["convert_to_gcode"],
                 action="convert_to_gcode",
                 data={"model_id": data.get("model_id")}
             ))
 
         else:
-            response = f"""**3D 모델 생성 시작!** 🎨
+            response = f"""**{L['model_generation_started']}** 🎨
 
-**타입:** {task_type}
-**프롬프트:** {prompt}
+**{L['type']}:** {task_type}
+**{L['prompt']}:** {prompt}
 
-모델을 생성 중입니다... (약 2-3분 소요)
+{L['model_generating']}
 
-완료되면 알려드릴게요!
+{L['model_notify']}
 """
 
             actions = [
                 SuggestedAction(
-                    label="진행 상황 확인",
+                    label=L["check_progress"],
                     action="check_modelling_status",
                     data={"task_id": data.get("task_id")}
                 )
@@ -395,26 +683,25 @@ class ResponseGenerator:
     ) -> tuple[str, List[SuggestedAction]]:
         """일반 질문 응답 (LLM 답변만, 참조 없음)"""
         data = tool_result.data or {}
-        answer = data.get("answer", "죄송합니다, 답변을 생성할 수 없습니다.")
+        L = self.labels
+        default_error = "Sorry, I couldn't generate a response." if self.language == "en" else "죄송합니다, 답변을 생성할 수 없습니다."
+        answer = data.get("answer", default_error)
 
         # 3D 모델링 관련 키워드 감지 시 안내 추가
         modelling_keywords = ["만들어", "생성해", "모델링", "3d", "create", "generate", "model"]
         if any(kw in original_message.lower() for kw in modelling_keywords):
-            modelling_guide = """
+            modelling_guide = f"""
 
 ---
 
-💡 **혹시 FACTOR 3D 모델링 기능을 찾고 계신가요?**
+💡 **{L['modelling_hint_title']}**
 
-텍스트나 이미지로 3D 모델을 생성하려면:
-1. **로그인** 후
-2. 좌측 **도구 선택**에서 **3D 모델링** 선택
-3. 원하는 모델을 설명하거나 이미지를 첨부해주세요!"""
+{L['modelling_hint_steps']}"""
             answer += modelling_guide
 
         actions = [
             SuggestedAction(
-                label="관련 질문하기",
+                label=L["follow_up"],
                 action="follow_up",
                 data={}
             )
@@ -432,16 +719,18 @@ class ResponseGenerator:
         도구 선택 없이 G-code 첨부 시 LLM 텍스트 답변만 반환
         """
         data = tool_result.data or {}
-        answer = data.get("answer", "G-code 분석 결과를 생성할 수 없습니다.")
+        L = self.labels
+        default_error = "Unable to generate G-code analysis results." if self.language == "en" else "G-code 분석 결과를 생성할 수 없습니다."
+        answer = data.get("answer", default_error)
 
         actions = [
             SuggestedAction(
-                label="상세 분석하기",
+                label=L["select_tool_gcode"],
                 action="select_tool",
                 data={"tool": "gcode"}
             ),
             SuggestedAction(
-                label="다른 질문하기",
+                label=L["follow_up"],
                 action="follow_up",
                 data={}
             )
@@ -455,6 +744,7 @@ class ResponseGenerator:
     ) -> tuple[str, List[SuggestedAction]]:
         """이슈 해결 응답 생성 (AI 해결하기)"""
         data = tool_result.data or {}
+        L = self.labels
         resolution = data.get("resolution", {})
         issue_line = data.get("issue_line", 0)
         issue_type = data.get("issue_type", "unknown")
@@ -480,17 +770,18 @@ class ResponseGenerator:
 
         # 오탐인 경우
         if is_false_positive:
-            response = f"""**✅ 문제 없음** (라인 {issue_line})
+            line_label = "Line" if self.language == "en" else "라인"
+            response = f"""**✅ {L['no_issue']}** ({line_label} {issue_line})
 
-**분석 결과:** 이 이슈는 **오탐(False Positive)**으로 판단됩니다.
+**{L['analysis_result']}:** {L['false_positive']}
 
-**이유:** {problem.get('false_positive_reason', problem.get('cause', ''))}
+**{L['reason']}:** {problem.get('false_positive_reason', problem.get('cause', ''))}
 
-> 💡 이 코드는 정상적으로 작동합니다. 슬라이서가 의도한 동작일 가능성이 높습니다.
+> 💡 {L['code_normal']}
 """
             actions = [
                 SuggestedAction(
-                    label="이슈 무시하기",
+                    label=L["dismiss_issue"],
                     action="dismiss_issue",
                     data={"line": issue_line, "type": issue_type}
                 )
@@ -499,24 +790,26 @@ class ResponseGenerator:
 
         # 실제 문제인 경우
         severity_emoji = {"low": "🟡", "medium": "🟠", "high": "🔴", "info": "ℹ️"}.get(severity, "⚠️")
-        severity_ko = {"low": "낮음", "medium": "보통", "high": "높음", "info": "참고"}.get(severity, severity)
+        severity_label = L["severity_levels"].get(severity, severity)
+        line_label = "Line" if self.language == "en" else "라인"
+        analyzing_label = "Analyzing..." if self.language == "en" else "분석 중..."
 
-        response = f"""**🔧 이슈 해결 방법** (라인 {issue_line})
+        response = f"""**🔧 {L['issue_resolution']}** ({line_label} {issue_line})
 
-**{severity_emoji} 심각도:** {severity_ko}
-
----
-
-**📋 문제 원인**
-{problem.get('cause', '분석 중...')}
-
-**⚠️ 출력 영향**
-- 품질: {impact.get('print_quality', '-')}
-- 실패 위험: {impact.get('failure_risk', '-')}
+**{severity_emoji} {L['severity']}:** {severity_label}
 
 ---
 
-**🛠️ 해결 방법** (난이도: {solution.get('difficulty', 'medium')})
+**📋 {L['problem_cause']}**
+{problem.get('cause', analyzing_label)}
+
+**⚠️ {L['print_impact']}**
+- {L['quality']}: {impact.get('print_quality', '-')}
+- {L['failure_risk']}: {impact.get('failure_risk', '-')}
+
+---
+
+**🛠️ {L['solution_method']}** ({L['difficulty']}: {solution.get('difficulty', 'medium')})
 """
 
         for i, step in enumerate(steps[:5], 1):
@@ -527,12 +820,12 @@ class ResponseGenerator:
             response += f"""
 ---
 
-**💻 코드 수정**
+**💻 {L['code_fix']}**
 ```gcode
-# 원본
+# {L['original']}
 {code_fix.get('original_line', '')}
 
-# 수정
+# {L['fixed']}
 {code_fix.get('fixed_line', '')}
 ```
 > {code_fix.get('explanation', '')}
@@ -541,18 +834,19 @@ class ResponseGenerator:
         # 예방 팁
         tips = prevention.get("tips", [])
         if tips:
-            response += "\n---\n\n**💡 예방 팁**\n"
+            response += f"\n---\n\n**💡 {L['prevention_tips']}**\n"
             for tip in tips[:3]:
                 response += f"- {tip}\n"
 
         if prevention.get("slicer_settings"):
-            response += f"\n> 슬라이서 설정: {prevention['slicer_settings']}"
+            slicer_label = "Slicer settings" if self.language == "en" else "슬라이서 설정"
+            response += f"\n> {slicer_label}: {prevention['slicer_settings']}"
 
         actions = []
 
         if has_fix:
             actions.append(SuggestedAction(
-                label="수정 코드 복사",
+                label=L["copy_fix"],
                 action="copy_fix",
                 data={
                     "line": issue_line,
@@ -561,7 +855,7 @@ class ResponseGenerator:
             ))
 
         actions.append(SuggestedAction(
-            label="다른 이슈 확인",
+            label=L["view_other_issues"],
             action="view_issues",
             data={"analysis_id": data.get("analysis_id")}
         ))
@@ -570,49 +864,48 @@ class ResponseGenerator:
 
     def _generate_greeting_response(self) -> tuple[str, List[SuggestedAction]]:
         """인사 응답"""
-        response = """안녕하세요! 3D 프린팅 어시스턴트입니다. 👋
+        L = self.labels
+        response = f"""{L['greeting']} 👋
 
-무엇을 도와드릴까요?
+{L['how_can_i_help']}
 
-**제가 도와드릴 수 있는 것들:**
-- 🔍 **G-code 분석** - G-code 파일을 분석하고 문제점을 찾아드려요
-- 🔧 **프린터 문제 진단** - 출력 실패 이미지나 증상을 분석해 해결책을 제안해요
-- 🎨 **3D 모델링** - 텍스트나 이미지로 3D 모델을 만들어드려요
-- ❓ **질문 답변** - 3D 프린팅 관련 질문에 답변해드려요
+**{L['capabilities_title']}**
+- {L['cap_gcode']}
+- {L['cap_troubleshoot']}
+- {L['cap_modelling']}
+- {L['cap_qa']}
 """
 
         actions = [
-            SuggestedAction(label="G-code 분석", action="select_tool", data={"tool": "gcode"}),
-            SuggestedAction(label="문제 진단", action="select_tool", data={"tool": "troubleshoot"}),
-            SuggestedAction(label="3D 모델링", action="select_tool", data={"tool": "modelling"}),
+            SuggestedAction(label=L["gcode_analysis"], action="select_tool", data={"tool": "gcode"}),
+            SuggestedAction(label=L["troubleshoot"], action="select_tool", data={"tool": "troubleshoot"}),
+            SuggestedAction(label=L["modelling_3d"], action="select_tool", data={"tool": "modelling"}),
         ]
 
         return response, actions
 
     def _generate_help_response(self) -> tuple[str, List[SuggestedAction]]:
         """도움말 응답"""
-        response = """**사용 방법** 📖
+        L = self.labels
+        response = f"""**{L['help_title']}** 📖
 
-**1. G-code 분석** 📊
-- G-code 파일을 첨부하고 "분석해줘"라고 말씀해주세요
-- 출력 시간, 필라멘트 사용량, 잠재적 문제점을 분석해드려요
+**{L['help_gcode_title']}** 📊
+{L['help_gcode_desc']}
 
-**2. 프린터 문제 진단** 🔧
-- 실패한 출력물 사진을 첨부하거나 증상을 설명해주세요
-- AI가 문제를 분석하고 해결책을 제안해드려요
+**{L['help_troubleshoot_title']}** 🔧
+{L['help_troubleshoot_desc']}
 
-**3. 3D 모델링** 🎨
-- **Text-to-3D:** "귀여운 고양이 피규어 만들어줘"
-- **Image-to-3D:** 이미지를 첨부하고 "이걸로 3D 모델 만들어줘"
+**{L['help_modelling_title']}** 🎨
+{L['help_modelling_desc']}
 
-**4. 일반 질문** ❓
-- PLA vs PETG 차이, 최적 온도 설정 등 무엇이든 물어보세요!
+**{L['help_general_title']}** ❓
+{L['help_general_desc']}
 """
 
         actions = [
-            SuggestedAction(label="G-code 분석 시작", action="select_tool", data={"tool": "gcode"}),
-            SuggestedAction(label="문제 진단 시작", action="select_tool", data={"tool": "troubleshoot"}),
-            SuggestedAction(label="3D 모델링 시작", action="select_tool", data={"tool": "modelling"}),
+            SuggestedAction(label=L["start_gcode"], action="select_tool", data={"tool": "gcode"}),
+            SuggestedAction(label=L["start_troubleshoot"], action="select_tool", data={"tool": "troubleshoot"}),
+            SuggestedAction(label=L["start_modelling"], action="select_tool", data={"tool": "modelling"}),
         ]
 
         return response, actions
