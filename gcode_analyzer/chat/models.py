@@ -24,6 +24,7 @@ class ChatIntent(str, Enum):
     TROUBLESHOOT = "troubleshoot"           # 프린터 문제 진단
     MODELLING_TEXT = "modelling_text"       # Text-to-3D 요청
     MODELLING_IMAGE = "modelling_image"     # Image-to-3D 요청
+    PRICE_COMPARISON = "price_comparison"   # 가격비교 요청
 
     # 일반 대화
     GENERAL_QUESTION = "general_question"   # 3D 프린팅 관련 질문
@@ -109,6 +110,12 @@ class ChatRequest(BaseModel):
     # G-code 이슈 해결용 (AI 해결하기)
     analysis_id: Optional[str] = Field(None, description="G-code 분석 ID (이슈 해결 시 필요)")
     issue_to_resolve: Optional[Dict[str, Any]] = Field(None, description="해결할 이슈 정보")
+
+    # 가격비교 옵션
+    price_comparison_options: Optional[Dict[str, Any]] = Field(
+        None,
+        description="가격비교 옵션 (marketplaces, min_price, max_price, sort_by, max_results, category, in_stock_only)"
+    )
 
     # 설정
     language: str = Field("ko", description="응답 언어")
@@ -232,3 +239,52 @@ class ModellingParams(BaseModel):
     image_url: Optional[str] = None  # Image-to-3D인 경우
     task_type: str = "text_to_3d"  # "text_to_3d" | "image_to_3d"
     quality: str = "medium"  # "low" | "medium" | "high"
+
+
+# ============================================================
+# Price Comparison Models
+# ============================================================
+class PriceComparisonOptions(BaseModel):
+    """가격비교 옵션"""
+    marketplaces: Optional[List[str]] = Field(
+        default=["naver", "coupang", "amazon", "ebay"],
+        description="검색할 마켓플레이스"
+    )
+    min_price: Optional[int] = Field(None, description="최소 가격 (KRW)")
+    max_price: Optional[int] = Field(None, description="최대 가격 (KRW)")
+    sort_by: str = Field("relevance", description="정렬 기준 (price_asc, price_desc, rating, review_count, relevance)")
+    max_results: int = Field(10, description="최대 결과 수")
+    category: Optional[str] = Field(None, description="카테고리 (3d_printer, filament, parts, accessories)")
+    in_stock_only: bool = Field(False, description="재고 있는 상품만")
+
+
+class PriceComparisonProduct(BaseModel):
+    """가격비교 상품"""
+    id: str = Field(..., description="상품 ID")
+    title: str = Field(..., description="상품명")
+    price: float = Field(..., description="가격 (원래 통화)")
+    currency: str = Field("KRW", description="통화")
+    price_krw: int = Field(..., description="원화 가격")
+    original_price: Optional[float] = Field(None, description="원래 가격 (할인 전)")
+    discount_percent: Optional[int] = Field(None, description="할인율")
+    marketplace: str = Field(..., description="마켓플레이스 (naver, coupang, amazon, ebay)")
+    product_url: str = Field(..., description="상품 URL")
+    image_url: Optional[str] = Field(None, description="상품 이미지 URL")
+    rating: Optional[float] = Field(None, description="평점")
+    review_count: Optional[int] = Field(None, description="리뷰 수")
+    in_stock: bool = Field(True, description="재고 여부")
+
+
+class PriceComparisonData(BaseModel):
+    """가격비교 결과 데이터"""
+    query: str = Field(..., description="검색 쿼리")
+    results_count: int = Field(..., description="결과 수")
+    markets_searched: List[str] = Field(..., description="검색한 마켓플레이스")
+    products: List[PriceComparisonProduct] = Field(default_factory=list, description="상품 목록")
+
+
+class PriceComparisonParams(BaseModel):
+    """가격비교 파라미터"""
+    query: str = Field(..., description="검색 쿼리")
+    options: Optional[PriceComparisonOptions] = Field(default_factory=PriceComparisonOptions)
+    language: str = Field("ko", description="응답 언어")

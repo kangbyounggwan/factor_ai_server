@@ -35,6 +35,16 @@ class IntentClassifier:
             r"problem", r"issue", r"error", r"fix", r"not working",
             r"안\s*붙", r"떨어", r"스트링", r"뒤틀", r"막힘"
         ],
+        ChatIntent.PRICE_COMPARISON: [
+            # 가격/구매 관련
+            r"가격", r"얼마", r"비교", r"최저가", r"싸", r"저렴",
+            r"price", r"cheap", r"compare", r"buy", r"purchase",
+            # 추천 + 제품명 (3D 프린터 관련 제품)
+            r"추천.*(프린터|필라멘트|노즐|베드|부품)",
+            r"(프린터|필라멘트|노즐|베드|부품).*추천",
+            # 구매처 관련
+            r"어디서.*사", r"어디가.*싸", r"구매", r"주문",
+        ],
         # MODELLING_TEXT 제거: 도구 선택 없이 "만들어줘"만으로 3D 모델링 실행 방지
         # 3D 모델링은 반드시 UI에서 도구를 선택해야 함
         ChatIntent.GREETING: [
@@ -116,6 +126,7 @@ class IntentClassifier:
             "troubleshoot": ChatIntent.TROUBLESHOOT,
             "gcode": ChatIntent.GCODE_ANALYSIS,
             "resolve_issue": ChatIntent.GCODE_ISSUE_RESOLVE,  # AI 해결하기
+            "price_comparison": ChatIntent.PRICE_COMPARISON,  # 가격비교
             "modelling": None,  # 이미지 여부에 따라 분기
         }
 
@@ -188,5 +199,14 @@ class IntentClassifier:
 
         elif intent == ChatIntent.GCODE_ANALYSIS:
             params["analysis_mode"] = "full"
+
+        elif intent == ChatIntent.PRICE_COMPARISON:
+            # 가격비교 쿼리 추출 (불필요한 단어 제거)
+            query = message
+            # "가격 비교해줘", "추천해줘" 등 제거
+            query = re.sub(r"(가격|비교|추천|구매|주문|어디서|사|싸|저렴)", "", query, flags=re.IGNORECASE)
+            query = re.sub(r"(해줘|해주세요|알려줘|알려주세요|좀)", "", query)
+            query = query.strip() or message
+            params["query"] = query
 
         return params

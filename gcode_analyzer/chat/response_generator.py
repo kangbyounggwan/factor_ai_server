@@ -166,6 +166,26 @@ class ResponseGenerator:
                 "modelling_hint_title": "Looking for FACTOR 3D modelling feature?",
                 "modelling_hint_steps": "To create 3D models from text or images:\n1. **Log in**\n2. Select **3D Modelling** from **Tool Selection** on the left\n3. Describe or attach an image of the model you want!",
                 "analyzing": "Analyzing...",
+
+                # 가격비교
+                "price_comparison_result": "Price Comparison Results",
+                "search_query": "Search",
+                "total_results": "Total results",
+                "markets_searched": "Markets searched",
+                "price_summary": "Price Summary",
+                "lowest_price": "Lowest",
+                "average_price": "Average",
+                "highest_price": "Highest",
+                "product_list": "Product List",
+                "marketplace": "Marketplace",
+                "rating": "Rating",
+                "reviews": "reviews",
+                "in_stock": "In Stock",
+                "out_of_stock": "Out of Stock",
+                "view_product": "View",
+                "no_results": "No products found. Try different keywords.",
+                "search_again": "Search Again",
+                "price_comparison": "Price Comparison",
             }
         else:
             self.labels = {
@@ -313,6 +333,26 @@ class ResponseGenerator:
                 "modelling_hint_title": "혹시 FACTOR 3D 모델링 기능을 찾고 계신가요?",
                 "modelling_hint_steps": "텍스트나 이미지로 3D 모델을 생성하려면:\n1. **로그인** 후\n2. 좌측 **도구 선택**에서 **3D 모델링** 선택\n3. 원하는 모델을 설명하거나 이미지를 첨부해주세요!",
                 "analyzing": "분석 중...",
+
+                # 가격비교
+                "price_comparison_result": "가격비교 결과",
+                "search_query": "검색어",
+                "total_results": "검색 결과",
+                "markets_searched": "검색한 마켓",
+                "price_summary": "가격 요약",
+                "lowest_price": "최저가",
+                "average_price": "평균가",
+                "highest_price": "최고가",
+                "product_list": "상품 목록",
+                "marketplace": "판매처",
+                "rating": "평점",
+                "reviews": "리뷰",
+                "in_stock": "재고 있음",
+                "out_of_stock": "품절",
+                "view_product": "보기",
+                "no_results": "검색 결과가 없습니다. 다른 키워드로 검색해보세요.",
+                "search_again": "다시 검색",
+                "price_comparison": "가격비교",
             }
 
     def generate(
@@ -352,6 +392,9 @@ class ResponseGenerator:
 
         elif intent == ChatIntent.GENERAL_QUESTION:
             return self._generate_general_response(tool_result, original_message)
+
+        elif intent == ChatIntent.PRICE_COMPARISON:
+            return self._generate_price_comparison_response(tool_result)
 
         elif intent == ChatIntent.GREETING:
             return self._generate_greeting_response()
@@ -906,6 +949,88 @@ class ResponseGenerator:
             SuggestedAction(label=L["start_gcode"], action="select_tool", data={"tool": "gcode"}),
             SuggestedAction(label=L["start_troubleshoot"], action="select_tool", data={"tool": "troubleshoot"}),
             SuggestedAction(label=L["start_modelling"], action="select_tool", data={"tool": "modelling"}),
+        ]
+
+        return response, actions
+
+    def _generate_price_comparison_response(
+        self,
+        tool_result: ToolResult
+    ) -> tuple[str, List[SuggestedAction]]:
+        """가격비교 응답 생성"""
+        data = tool_result.data or {}
+        L = self.labels
+
+        query = data.get("query", "")
+        results_count = data.get("results_count", 0)
+        markets = data.get("markets_searched", [])
+        price_summary = data.get("price_summary", {})
+
+        # 결과가 없는 경우
+        if results_count == 0:
+            response = f"""**{L['price_comparison_result']}** 🛒
+
+**{L['search_query']}:** {query}
+
+{L['no_results']}
+"""
+            actions = [
+                SuggestedAction(
+                    label=L["search_again"],
+                    action="price_comparison",
+                    data={}
+                )
+            ]
+            return response, actions
+
+        # 마켓 이름 포맷팅
+        markets_str = ", ".join(markets) if markets else "-"
+
+        # 가격 포맷팅 (원화)
+        def format_price(price: int) -> str:
+            return f"₩{price:,}"
+
+        response = f"""**{L['price_comparison_result']}** 🛒
+
+**{L['search_query']}:** {query}
+**{L['total_results']}:** {results_count}개
+**{L['markets_searched']}:** {markets_str}
+
+"""
+
+        # 가격 요약
+        if price_summary:
+            min_price = price_summary.get("min", 0)
+            avg_price = price_summary.get("avg", 0)
+            max_price = price_summary.get("max", 0)
+
+            response += f"""**📊 {L['price_summary']}**
+| {L['lowest_price']} | {L['average_price']} | {L['highest_price']} |
+|---------|---------|---------|
+| {format_price(min_price)} | {format_price(avg_price)} | {format_price(max_price)} |
+
+---
+
+"""
+
+        # AI 리뷰 (상품 목록 대신)
+        ai_review = data.get("ai_review", "")
+        if ai_review:
+            ai_analysis_label = "AI Analysis" if self.language == "en" else "AI 분석"
+            response += f"**🤖 {ai_analysis_label}**\n\n"
+            response += ai_review + "\n"
+
+        actions = [
+            SuggestedAction(
+                label=L["search_again"],
+                action="price_comparison",
+                data={}
+            ),
+            SuggestedAction(
+                label=L["follow_up"],
+                action="follow_up",
+                data={}
+            )
         ]
 
         return response, actions

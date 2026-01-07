@@ -100,6 +100,12 @@ class ToolDispatcher:
             elif intent == ChatIntent.GENERAL_QUESTION:
                 return await self._execute_general_qa(message, conversation_history)
 
+            elif intent == ChatIntent.PRICE_COMPARISON:
+                query = extracted_params.get("query", message)
+                return await self._execute_price_comparison(
+                    query, message, user_plan
+                )
+
             elif intent == ChatIntent.GREETING:
                 return ToolResult(
                     tool_name="greeting",
@@ -857,3 +863,177 @@ class ToolDispatcher:
                 success=False,
                 error="이슈 해결 방법을 찾는 중 문제가 발생했습니다.\n\n💡 잠시 후 다시 시도하거나, 문제 진단 도구를 사용하여 더 자세한 분석을 받아보세요."
             )
+
+    async def _execute_price_comparison(
+        self,
+        query: str,
+        original_message: str,
+        user_plan: UserPlan
+    ) -> ToolResult:
+        """
+        가격비교 실행 + AI 리뷰 생성
+
+        Args:
+            query: 추출된 검색 쿼리
+            original_message: 원본 메시지
+            user_plan: 사용자 플랜
+
+        Returns:
+            ToolResult: 가격비교 결과 + AI 분석
+        """
+        try:
+            from ..price_comparison import SerpAPIClient
+            from ..price_comparison.models import PriceComparisonOptions
+
+            # SerpAPI 클라이언트 초기화
+            client = SerpAPIClient()
+
+            # 검색 옵션 설정
+            options = PriceComparisonOptions(
+                max_results=10,
+                sort_by="relevance"
+            )
+
+            # 검색 실행
+            result = await client.search(query, options)
+
+            # 상품 데이터 구성
+            products_data = [
+                {
+                    "id": p.id,
+                    "title": p.title,
+                    "price": p.price,
+                    "currency": p.currency,
+                    "price_krw": p.price_krw,
+                    "original_price": p.original_price,
+                    "discount_percent": p.discount_percent,
+                    "marketplace": p.marketplace,
+                    "product_url": p.product_url,
+                    "image_url": p.image_url,
+                    "rating": p.rating,
+                    "review_count": p.review_count,
+                    "in_stock": p.in_stock
+                }
+                for p in result.products
+            ]
+
+            # AI 리뷰 생성
+            ai_review = await self._generate_price_comparison_review(
+                query=query,
+                original_message=original_message,
+                products=products_data,
+                price_summary=result.price_summary
+            )
+
+            # 결과 반환
+            return ToolResult(
+                tool_name="price_comparison",
+                success=True,
+                data={
+                    "query": result.query,
+                    "results_count": result.results_count,
+                    "markets_searched": result.markets_searched,
+                    "products": products_data,
+                    "price_summary": result.price_summary,
+                    "ai_review": ai_review  # AI 분석 결과 추가
+                }
+            )
+
+        except ValueError as e:
+            # API 키 미설정 등
+            logger.error(f"Price comparison config error: {e}")
+            return ToolResult(
+                tool_name="price_comparison",
+                success=False,
+                error="가격비교 서비스가 현재 사용 불가능합니다. 잠시 후 다시 시도해주세요."
+            )
+
+        except Exception as e:
+            logger.error(f"Price comparison failed: {e}", exc_info=True)
+            return ToolResult(
+                tool_name="price_comparison",
+                success=False,
+                error=f"가격비교 중 오류가 발생했습니다: {str(e)}"
+            )
+
+    async def _generate_price_comparison_review(
+        self,
+        query: str,
+        original_message: str,
+        products: list,
+        price_summary: dict
+    ) -> str:
+        """
+        가격비교 결과를 분석하여 AI 리뷰 생성
+
+        Args:
+            query: 검색 쿼리
+            original_message: 원본 사용자 메시지
+            products: 상품 목록
+            price_summary: 가격 요약
+
+        Returns:
+            str: AI 분석 리뷰 텍스트
+        """
+        if not products:
+            return ""
+
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from ..llm.client import get_llm_by_model
+            import json
+
+            model_name = self.selected_model or "gemini-2.5-flash-lite"
+            llm = get_llm_by_model(
+                model_name=model_name,
+                temperature=0.3,
+                max_output_tokens=1024
+            )
+
+            # 상품 정보 요약 (상위 5개만)
+            products_info = []
+            for p in products[:5]:
+                info = f"- {p['title'][:40]}: ₩{p['price_krw']:,} ({p['marketplace']})"
+                if p.get('rating'):
+                    info += f" ⭐{p['rating']}"
+                    if p.get('review_count'):
+                        info += f" ({p['review_count']}개 리뷰)"
+                products_info.append(info)
+
+            products_text = "\n".join(products_info)
+
+            # 가격 정보
+            min_price = price_summary.get("min", 0) if price_summary else 0
+            avg_price = price_summary.get("avg", 0) if price_summary else 0
+            max_price = price_summary.get("max", 0) if price_summary else 0
+
+            system_prompt = f"""당신은 3D 프린팅 제품 전문가입니다.
+사용자가 "{query}"를 검색했습니다.
+
+## 검색된 상품 정보
+{products_text}
+
+## 가격 요약
+- 최저가: ₩{min_price:,}
+- 평균가: ₩{avg_price:,}
+- 최고가: ₩{max_price:,}
+
+## 응답 지침
+1. 검색된 제품들에 대한 간단한 분석을 제공하세요
+2. 적정 가격대와 구매 시 고려사항을 설명하세요
+3. 평점과 리뷰 수를 기반으로 추천 의견을 제시하세요
+4. 3-4문단으로 간결하게 작성하세요
+5. 마크다운 형식으로 작성하세요 (제목 없이 본문만)
+6. 언어: {self.language}"""
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=original_message)
+            ]
+
+            response = await llm.ainvoke(messages)
+            return response.content
+
+        except Exception as e:
+            logger.warning(f"Failed to generate price comparison review: {e}")
+            return ""
