@@ -871,10 +871,10 @@ class ToolDispatcher:
         user_plan: UserPlan
     ) -> ToolResult:
         """
-        가격비교 실행 + AI 리뷰 생성
+        가격비교 실행 (AI 분석 → 키워드 추출 → 검색 → 결과)
 
         Args:
-            query: 추출된 검색 쿼리
+            query: 추출된 검색 쿼리 (fallback용)
             original_message: 원본 메시지
             user_plan: 사용자 플랜
 
@@ -885,17 +885,57 @@ class ToolDispatcher:
             from ..price_comparison import SerpAPIClient
             from ..price_comparison.models import PriceComparisonOptions
 
-            # SerpAPI 클라이언트 초기화
-            client = SerpAPIClient()
+            # Step 1: AI 분석으로 검색 키워드 추출 (2~4개)
+            analysis_result = await self._analyze_and_extract_keywords(original_message)
 
-            # 검색 옵션 설정
+            search_keywords = analysis_result.get("keywords", [])
+            ai_review = analysis_result.get("analysis", "")
+
+            # 키워드 추출 실패 시 fallback
+            if not search_keywords:
+                search_keywords = [query] if query else ["3D 프린터"]
+                logger.warning(f"Keyword extraction failed, using fallback: {search_keywords}")
+
+            logger.info(f"Extracted search keywords: {search_keywords}")
+
+            # Step 2: SerpAPI로 검색 실행
+            client = SerpAPIClient()
             options = PriceComparisonOptions(
                 max_results=10,
                 sort_by="relevance"
             )
 
-            # 검색 실행
-            result = await client.search(query, options)
+            # 모든 키워드로 검색하고 결과 병합
+            all_products = []
+            markets_searched = set()
+
+            for keyword in search_keywords[:4]:  # 최대 4개 키워드
+                try:
+                    result = await client.search(keyword, options)
+
+                    # 제목 관련성 필터링 적용
+                    filtered_products = self._filter_relevant_products(
+                        result.products,
+                        search_keywords
+                    )
+                    all_products.extend(filtered_products)
+                    markets_searched.update(result.markets_searched)
+                except Exception as e:
+                    logger.warning(f"Search failed for keyword '{keyword}': {e}")
+                    continue
+
+            # 중복 제거 (제목 기준)
+            seen_titles = set()
+            unique_products = []
+            for p in all_products:
+                title_key = p.title.lower()[:50]
+                if title_key not in seen_titles:
+                    seen_titles.add(title_key)
+                    unique_products.append(p)
+
+            # 가격순 정렬 후 상위 10개
+            unique_products.sort(key=lambda x: x.price_krw or x.price or float('inf'))
+            unique_products = unique_products[:10]
 
             # 상품 데이터 구성
             products_data = [
@@ -914,33 +954,36 @@ class ToolDispatcher:
                     "review_count": p.review_count,
                     "in_stock": p.in_stock
                 }
-                for p in result.products
+                for p in unique_products
             ]
 
-            # AI 리뷰 생성
-            ai_review = await self._generate_price_comparison_review(
-                query=query,
-                original_message=original_message,
-                products=products_data,
-                price_summary=result.price_summary
-            )
+            # 가격 요약 계산
+            if products_data:
+                prices = [p["price_krw"] or p["price"] for p in products_data if p["price_krw"] or p["price"]]
+                price_summary = {
+                    "min": min(prices) if prices else 0,
+                    "max": max(prices) if prices else 0,
+                    "avg": int(sum(prices) / len(prices)) if prices else 0
+                }
+            else:
+                price_summary = {"min": 0, "max": 0, "avg": 0}
 
             # 결과 반환
             return ToolResult(
                 tool_name="price_comparison",
                 success=True,
                 data={
-                    "query": result.query,
-                    "results_count": result.results_count,
-                    "markets_searched": result.markets_searched,
+                    "query": ", ".join(search_keywords),
+                    "results_count": len(products_data),
+                    "markets_searched": list(markets_searched),
                     "products": products_data,
-                    "price_summary": result.price_summary,
-                    "ai_review": ai_review  # AI 분석 결과 추가
+                    "price_summary": price_summary,
+                    "ai_review": ai_review,
+                    "search_keywords": search_keywords  # 사용된 검색 키워드
                 }
             )
 
         except ValueError as e:
-            # API 키 미설정 등
             logger.error(f"Price comparison config error: {e}")
             return ToolResult(
                 tool_name="price_comparison",
@@ -956,84 +999,138 @@ class ToolDispatcher:
                 error=f"가격비교 중 오류가 발생했습니다: {str(e)}"
             )
 
-    async def _generate_price_comparison_review(
-        self,
-        query: str,
-        original_message: str,
-        products: list,
-        price_summary: dict
-    ) -> str:
+    async def _analyze_and_extract_keywords(self, user_message: str) -> Dict[str, Any]:
         """
-        가격비교 결과를 분석하여 AI 리뷰 생성
+        사용자 메시지를 분석하여 검색 키워드와 AI 분석을 동시에 생성
 
         Args:
-            query: 검색 쿼리
-            original_message: 원본 사용자 메시지
-            products: 상품 목록
-            price_summary: 가격 요약
+            user_message: 원본 사용자 메시지
 
         Returns:
-            str: AI 분석 리뷰 텍스트
+            Dict with 'keywords' (list) and 'analysis' (str)
         """
-        if not products:
-            return ""
-
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
             from ..llm.client import get_llm_by_model
             import json
+            import re
 
             model_name = self.selected_model or "gemini-2.5-flash-lite"
             llm = get_llm_by_model(
                 model_name=model_name,
                 temperature=0.3,
-                max_output_tokens=1024
+                max_output_tokens=1500
             )
 
-            # 상품 정보 요약 (상위 5개만)
-            products_info = []
-            for p in products[:5]:
-                info = f"- {p['title'][:40]}: ₩{p['price_krw']:,} ({p['marketplace']})"
-                if p.get('rating'):
-                    info += f" ⭐{p['rating']}"
-                    if p.get('review_count'):
-                        info += f" ({p['review_count']}개 리뷰)"
-                products_info.append(info)
+            system_prompt = f"""당신은 3D 프린팅 제품 전문가이자 쇼핑 검색 전문가입니다.
 
-            products_text = "\n".join(products_info)
+## 작업
+사용자의 메시지를 분석하여 두 가지를 수행합니다:
+1. **검색 키워드 추출**: 사용자가 찾고자 하는 제품을 정확히 검색할 수 있는 키워드 2~4개 추출
+2. **AI 분석**: 사용자의 요구사항에 맞는 제품 추천 및 구매 가이드 작성
 
-            # 가격 정보
-            min_price = price_summary.get("min", 0) if price_summary else 0
-            avg_price = price_summary.get("avg", 0) if price_summary else 0
-            max_price = price_summary.get("max", 0) if price_summary else 0
+## 검색 키워드 추출 규칙
+- 실제 쇼핑몰에서 검색할 수 있는 구체적인 제품명 사용
+- 브랜드명이 언급되면 포함 (예: "밤부랩 A1 mini", "Creality Ender 3")
+- 일반적인 카테고리도 포함 (예: "3D 프린터", "FDM 프린터")
+- 가격대가 언급되면 "가성비 3D 프린터" 같은 형태로 포함
+- 2~4개의 키워드를 추출
 
-            system_prompt = f"""당신은 3D 프린팅 제품 전문가입니다.
-사용자가 "{query}"를 검색했습니다.
+## 출력 형식 (반드시 이 JSON 형식으로)
+```json
+{{
+    "keywords": ["키워드1", "키워드2", "키워드3"],
+    "analysis": "AI 분석 내용 (마크다운 형식, 3-4문단)"
+}}
+```
 
-## 검색된 상품 정보
-{products_text}
-
-## 가격 요약
-- 최저가: ₩{min_price:,}
-- 평균가: ₩{avg_price:,}
-- 최고가: ₩{max_price:,}
-
-## 응답 지침
-1. 검색된 제품들에 대한 간단한 분석을 제공하세요
-2. 적정 가격대와 구매 시 고려사항을 설명하세요
-3. 평점과 리뷰 수를 기반으로 추천 의견을 제시하세요
-4. 3-4문단으로 간결하게 작성하세요
-5. 마크다운 형식으로 작성하세요 (제목 없이 본문만)
-6. 언어: {self.language}"""
+## AI 분석 작성 규칙
+1. 사용자의 요구사항(예산, 용도 등)에 맞는 제품 추천
+2. 해당 제품군의 특징과 구매 시 고려사항 설명
+3. 가격대별 추천 모델 언급
+4. 마크다운 형식으로 3-4문단 작성
+5. 언어: {self.language}"""
 
             messages = [
                 SystemMessage(content=system_prompt),
-                HumanMessage(content=original_message)
+                HumanMessage(content=f"사용자 메시지: {user_message}")
             ]
 
             response = await llm.ainvoke(messages)
-            return response.content
+            content = response.content
+
+            # JSON 파싱 시도
+            json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # JSON 블록 없이 바로 JSON인 경우
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                json_str = json_match.group(0) if json_match else content
+
+            try:
+                result = json.loads(json_str)
+                return {
+                    "keywords": result.get("keywords", []),
+                    "analysis": result.get("analysis", "")
+                }
+            except json.JSONDecodeError:
+                # JSON 파싱 실패 시 전체 내용을 분석으로 사용
+                logger.warning("Failed to parse JSON from LLM response, using content as analysis")
+                return {
+                    "keywords": [],
+                    "analysis": content
+                }
 
         except Exception as e:
-            logger.warning(f"Failed to generate price comparison review: {e}")
-            return ""
+            logger.error(f"Failed to analyze and extract keywords: {e}", exc_info=True)
+            return {"keywords": [], "analysis": ""}
+
+    def _filter_relevant_products(
+        self,
+        products: list,
+        keywords: List[str]
+    ) -> list:
+        """
+        검색 키워드와 관련 있는 상품만 필터링
+
+        Args:
+            products: 검색된 상품 목록
+            keywords: 검색 키워드 목록
+
+        Returns:
+            관련성 있는 상품만 포함된 목록
+        """
+        if not keywords:
+            return products
+
+        # 키워드를 소문자로 변환
+        keyword_parts = []
+        for kw in keywords:
+            # 각 키워드를 단어로 분리
+            parts = kw.lower().replace("-", " ").split()
+            keyword_parts.extend(parts)
+
+        # 3D 프린터 관련 핵심 키워드
+        printer_keywords = {
+            "3d", "프린터", "printer", "프린팅", "printing",
+            "fdm", "sla", "resin", "레진", "필라멘트", "filament",
+            "bambu", "밤부", "creality", "anycubic", "ender", "prusa",
+            "노즐", "nozzle", "베드", "bed", "익스트루더", "extruder"
+        }
+
+        filtered = []
+        for product in products:
+            title_lower = product.title.lower()
+
+            # 방법 1: 키워드 단어가 제목에 포함되어 있는지
+            keyword_match = any(part in title_lower for part in keyword_parts if len(part) > 1)
+
+            # 방법 2: 3D 프린터 관련 키워드가 있는지
+            printer_match = any(pk in title_lower for pk in printer_keywords)
+
+            if keyword_match or printer_match:
+                filtered.append(product)
+
+        return filtered if filtered else products[:5]  # 필터링 결과가 없으면 상위 5개 반환
+
