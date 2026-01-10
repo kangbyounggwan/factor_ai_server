@@ -885,23 +885,25 @@ class ToolDispatcher:
             from ..price_comparison import SerpAPIClient
             from ..price_comparison.models import PriceComparisonOptions
 
-            # Step 1: AI 분석으로 검색 키워드 추출 (2~4개)
+            # Step 1: AI 분석으로 검색 키워드 + 예산 추출
             analysis_result = await self._analyze_and_extract_keywords(original_message)
 
             search_keywords = analysis_result.get("keywords", [])
             ai_review = analysis_result.get("analysis", "")
+            min_budget = analysis_result.get("min_budget")
+            max_budget = analysis_result.get("max_budget")
 
             # 키워드 추출 실패 시 fallback
             if not search_keywords:
-                search_keywords = [query] if query else ["3D 프린터"]
+                search_keywords = [query] if query else ["3D 프린터 본체"]
                 logger.warning(f"Keyword extraction failed, using fallback: {search_keywords}")
 
-            logger.info(f"Extracted search keywords: {search_keywords}")
+            logger.info(f"Extracted search keywords: {search_keywords}, budget: {min_budget}~{max_budget}")
 
             # Step 2: SerpAPI로 검색 실행
             client = SerpAPIClient()
             options = PriceComparisonOptions(
-                max_results=10,
+                max_results=15,  # 필터링 고려해서 더 많이 검색
                 sort_by="relevance"
             )
 
@@ -913,10 +915,12 @@ class ToolDispatcher:
                 try:
                     result = await client.search(keyword, options)
 
-                    # 제목 관련성 필터링 적용
+                    # 제목 관련성 + 부품 제외 필터링 적용
                     filtered_products = self._filter_relevant_products(
                         result.products,
-                        search_keywords
+                        search_keywords,
+                        min_budget,
+                        max_budget
                     )
                     all_products.extend(filtered_products)
                     markets_searched.update(result.markets_searched)
@@ -933,8 +937,18 @@ class ToolDispatcher:
                     seen_titles.add(title_key)
                     unique_products.append(p)
 
-            # 가격순 정렬 후 상위 10개
-            unique_products.sort(key=lambda x: x.price_krw or x.price or float('inf'))
+            # 예산 범위 내 상품 우선, 그 다음 가격순 정렬
+            def sort_key(product):
+                price = product.price_krw or product.price or float('inf')
+                # 예산 범위 내면 우선순위 높음
+                in_budget = True
+                if max_budget and price > max_budget * 1.2:  # 20% 여유
+                    in_budget = False
+                if min_budget and price < min_budget * 0.5:  # 너무 저렴한 것은 부품일 가능성
+                    in_budget = False
+                return (0 if in_budget else 1, price)
+
+            unique_products.sort(key=sort_key)
             unique_products = unique_products[:10]
 
             # 상품 데이터 구성
@@ -1025,21 +1039,32 @@ class ToolDispatcher:
             system_prompt = f"""당신은 3D 프린팅 제품 전문가이자 쇼핑 검색 전문가입니다.
 
 ## 작업
-사용자의 메시지를 분석하여 두 가지를 수행합니다:
+사용자의 메시지를 분석하여 세 가지를 수행합니다:
 1. **검색 키워드 추출**: 사용자가 찾고자 하는 제품을 정확히 검색할 수 있는 키워드 2~4개 추출
-2. **AI 분석**: 사용자의 요구사항에 맞는 제품 추천 및 구매 가이드 작성
+2. **예산 추출**: 사용자가 언급한 예산 범위 (만원 단위)
+3. **AI 분석**: 사용자의 요구사항에 맞는 제품 추천 및 구매 가이드 작성
 
-## 검색 키워드 추출 규칙
-- 실제 쇼핑몰에서 검색할 수 있는 구체적인 제품명 사용
-- 브랜드명이 언급되면 포함 (예: "밤부랩 A1 mini", "Creality Ender 3")
-- 일반적인 카테고리도 포함 (예: "3D 프린터", "FDM 프린터")
-- 가격대가 언급되면 "가성비 3D 프린터" 같은 형태로 포함
+## 검색 키워드 추출 규칙 (매우 중요!)
+- **본체 제품을 검색할 때는 반드시 "본체" 또는 제품 전체를 의미하는 단어 포함**
+  - 예: "밤부랩 A1 mini 본체", "3D 프린터 본체", "Ender 3 V2 3D프린터"
+- 부품이나 액세서리가 아닌 **완제품**을 검색하도록 키워드 구성
+- 브랜드명이 언급되면 포함
 - 2~4개의 키워드를 추출
+- 키워드 예시:
+  - 좋음: "밤부랩 A1 mini 3D프린터", "Creality Ender 3 V2 본체"
+  - 나쁨: "밤부랩 A1 mini" (부품도 검색됨), "3D 프린터" (너무 광범위)
+
+## 예산 추출 규칙
+- 사용자가 "30만원", "~30", "30까지" 등으로 언급하면 해당 금액 추출
+- 최소/최대 예산이 있으면 둘 다 추출
+- 언급이 없으면 null
 
 ## 출력 형식 (반드시 이 JSON 형식으로)
 ```json
 {{
-    "keywords": ["키워드1", "키워드2", "키워드3"],
+    "keywords": ["키워드1 본체", "키워드2 3D프린터"],
+    "min_budget": null,
+    "max_budget": 300000,
     "analysis": "AI 분석 내용 (마크다운 형식, 3-4문단)"
 }}
 ```
@@ -1072,31 +1097,39 @@ class ToolDispatcher:
                 result = json.loads(json_str)
                 return {
                     "keywords": result.get("keywords", []),
-                    "analysis": result.get("analysis", "")
+                    "analysis": result.get("analysis", ""),
+                    "min_budget": result.get("min_budget"),
+                    "max_budget": result.get("max_budget")
                 }
             except json.JSONDecodeError:
                 # JSON 파싱 실패 시 전체 내용을 분석으로 사용
                 logger.warning("Failed to parse JSON from LLM response, using content as analysis")
                 return {
                     "keywords": [],
-                    "analysis": content
+                    "analysis": content,
+                    "min_budget": None,
+                    "max_budget": None
                 }
 
         except Exception as e:
             logger.error(f"Failed to analyze and extract keywords: {e}", exc_info=True)
-            return {"keywords": [], "analysis": ""}
+            return {"keywords": [], "analysis": "", "min_budget": None, "max_budget": None}
 
     def _filter_relevant_products(
         self,
         products: list,
-        keywords: List[str]
+        keywords: List[str],
+        min_budget: Optional[int] = None,
+        max_budget: Optional[int] = None
     ) -> list:
         """
-        검색 키워드와 관련 있는 상품만 필터링
+        검색 키워드와 관련 있는 상품만 필터링 (부품/액세서리 제외)
 
         Args:
             products: 검색된 상품 목록
             keywords: 검색 키워드 목록
+            min_budget: 최소 예산 (원)
+            max_budget: 최대 예산 (원)
 
         Returns:
             관련성 있는 상품만 포함된 목록
@@ -1104,33 +1137,78 @@ class ToolDispatcher:
         if not keywords:
             return products
 
+        # 부품/액세서리 제외 키워드 (본체가 아닌 것들)
+        accessory_keywords = {
+            # 부품류
+            "노즐", "nozzle", "벨트", "belt", "베어링", "bearing",
+            "팬", "fan", "히터", "heater", "서미스터", "thermistor",
+            "익스트루더", "extruder", "핫엔드", "hotend", "hot end",
+            "모터", "motor", "stepper", "스테퍼",
+            "보드", "board", "메인보드", "mainboard",
+            "전원", "power supply", "psu",
+            "케이블", "cable", "와이어", "wire",
+            "스프링", "spring", "나사", "screw", "볼트", "bolt",
+            "튜브", "tube", "ptfe", "bowden",
+            # 액세서리류
+            "필름", "film", "보호필름", "스크린", "screen protector",
+            "커버", "cover", "케이스", "case", "가방", "bag",
+            "스티커", "sticker", "데칼", "decal",
+            "거치대", "stand", "홀더", "holder", "마운트", "mount",
+            "도구", "tool", "키트", "kit", "세트", "set",
+            "스페어", "spare", "교체", "replacement", "부품", "part",
+            "업그레이드", "upgrade",
+            # 소모품
+            "필라멘트", "filament", "pla", "abs", "petg", "tpu",
+            "레진", "resin", "수지",
+            "테이프", "tape", "접착", "glue", "adhesive",
+            "스프레이", "spray", "윤활", "lubricant",
+            "청소", "clean", "브러시", "brush",
+            # 기타
+            "매뉴얼", "manual", "가이드", "guide",
+            "윈패드", "패드", "pad"
+        }
+
+        # 본체임을 나타내는 키워드
+        main_product_keywords = {
+            "3d프린터", "3d 프린터", "3d printer", "프린터 본체",
+            "printer", "프린터기", "출력기"
+        }
+
         # 키워드를 소문자로 변환
         keyword_parts = []
         for kw in keywords:
-            # 각 키워드를 단어로 분리
             parts = kw.lower().replace("-", " ").split()
             keyword_parts.extend(parts)
-
-        # 3D 프린터 관련 핵심 키워드
-        printer_keywords = {
-            "3d", "프린터", "printer", "프린팅", "printing",
-            "fdm", "sla", "resin", "레진", "필라멘트", "filament",
-            "bambu", "밤부", "creality", "anycubic", "ender", "prusa",
-            "노즐", "nozzle", "베드", "bed", "익스트루더", "extruder"
-        }
 
         filtered = []
         for product in products:
             title_lower = product.title.lower()
+            price = product.price_krw or product.price or 0
 
-            # 방법 1: 키워드 단어가 제목에 포함되어 있는지
+            # Step 1: 부품/액세서리 제외
+            is_accessory = any(acc in title_lower for acc in accessory_keywords)
+
+            # 하지만 "본체", "프린터" 등이 포함되면 본체로 간주
+            is_main_product = any(main in title_lower for main in main_product_keywords)
+
+            # 부품인데 본체 키워드가 없으면 제외
+            if is_accessory and not is_main_product:
+                continue
+
+            # Step 2: 가격 필터링
+            if price > 0:
+                # 최소 예산이 있으면 그 이상만
+                if min_budget and price < min_budget * 0.5:  # 최소 예산의 50% 미만 제외
+                    continue
+                # 최대 예산의 10% 미만은 부품일 가능성 높음
+                if max_budget and price < max_budget * 0.1:
+                    continue
+
+            # Step 3: 키워드 매칭
             keyword_match = any(part in title_lower for part in keyword_parts if len(part) > 1)
 
-            # 방법 2: 3D 프린터 관련 키워드가 있는지
-            printer_match = any(pk in title_lower for pk in printer_keywords)
-
-            if keyword_match or printer_match:
+            if keyword_match or is_main_product:
                 filtered.append(product)
 
-        return filtered if filtered else products[:5]  # 필터링 결과가 없으면 상위 5개 반환
+        return filtered if filtered else products[:5]
 
