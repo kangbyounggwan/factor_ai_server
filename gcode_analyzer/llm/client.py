@@ -22,6 +22,21 @@ MODELS = {
 }
 
 
+def _anthropic_client(lite: bool, temperature: float, max_output_tokens: int) -> "BaseChatModel":
+    """Anthropic(Claude) 클라이언트. LLM_PROVIDER=anthropic 일 때 사용."""
+    from langchain_anthropic import ChatAnthropic
+    model_name = (
+        os.getenv("ANTHROPIC_MODEL_LITE", "claude-haiku-5-5") if lite
+        else os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+    )
+    return ChatAnthropic(
+        model=model_name,
+        api_key=os.environ["ANTHROPIC_API_KEY"],
+        # 최신 Claude 모델은 temperature 지정을 받지 않으므로 전달하지 않는다.
+        max_tokens=max_output_tokens,
+    )
+
+
 def get_llm_client_lite(
     temperature: float = 0.0,
     max_output_tokens: int = 512
@@ -31,6 +46,9 @@ def get_llm_client_lite(
     - Rule Engine 이슈 검증
     - 간단한 Yes/No 판단
     """
+    if get_provider() == "anthropic":
+        return _anthropic_client(True, temperature, max_output_tokens)
+
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     api_key = get_gemini_api_key()
@@ -47,7 +65,7 @@ def get_llm_client_lite(
 def get_provider() -> LLMProvider:
     """환경 변수에서 LLM 프로바이더 가져오기"""
     provider = os.getenv("LLM_PROVIDER", "gemini").lower()
-    if provider not in ["gemini", "openai"]:
+    if provider not in ["gemini", "openai", "anthropic"]:
         provider = "gemini"
     return provider
 
@@ -86,6 +104,9 @@ def get_llm_client(
     """
     if provider is None:
         provider = get_provider()
+
+    if provider == "anthropic":
+        return _anthropic_client(False, temperature, max_output_tokens)
 
     if provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -149,6 +170,10 @@ def get_llm_by_model(
     """
     # 모델명에서 프로바이더 판별
     model_lower = model_name.lower()
+
+    # Gemini/GPT 키가 없는 배포에서는 요청 모델과 무관하게 Claude 로 처리
+    if get_provider() == "anthropic" and "claude" not in model_lower:
+        return _anthropic_client("lite" in model_lower, temperature, max_output_tokens)
 
     if "gemini" in model_lower:
         from langchain_google_genai import ChatGoogleGenerativeAI
