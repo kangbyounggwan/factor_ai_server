@@ -1290,7 +1290,8 @@ async def resolve_gcode_issue(analysis_id: str, request: IssueResolveRequest):
             "analysis_id": analysis_id,
             "issue_line": line_number,
             "resolution": result["resolution"],
-            "updated_issue": result["updated_issue"]
+            "updated_issue": result["updated_issue"],
+            "knowledge_cases": result.get("knowledge_cases", [])
         }
 
     except Exception as e:
@@ -1344,7 +1345,8 @@ async def resolve_issue_standalone(request: IssueResolveRequest):
             "analysis_id": request.analysis_id,
             "issue_line": request.issue.get("line"),
             "resolution": result["resolution"],
-            "updated_issue": result["updated_issue"]
+            "updated_issue": result["updated_issue"],
+            "knowledge_cases": result.get("knowledge_cases", [])
         }
 
     except Exception as e:

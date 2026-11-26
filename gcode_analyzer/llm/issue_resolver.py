@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from .client import get_llm_client
 from .issue_resolver_prompt import ISSUE_RESOLVER_PROMPT
 from .language import get_language_instruction
+from ..knowledge import similar_cases_for_issue
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +93,13 @@ async def resolve_issue(
     Returns:
         {
             "resolution": {...},  # 해결 결과 (explanation, solution, tips)
-            "updated_issue": {...}  # 수정된 원본 이슈 (오탐 시 severity="none", has_issue=false 등)
+            "updated_issue": {...},  # 수정된 원본 이슈 (오탐 시 severity="none", has_issue=false 등)
+            "knowledge_cases": [...]  # 지식베이스의 유사 실증 사례 (증상·원인·조치·신뢰도 W(n)), 없으면 []
         }
     """
+    # 온톨로지 트리플 지식베이스에서 같은 증상의 유사 사례를 찾는다 (LLM 과 무관, 실패해도 빈 목록)
+    knowledge_cases = similar_cases_for_issue(issue)
+
     llm = get_llm_client(max_output_tokens=1024)
 
     # ============================================================
@@ -213,7 +218,8 @@ async def resolve_issue(
 
         return {
             "resolution": resolution,
-            "updated_issue": updated_issue
+            "updated_issue": updated_issue,
+            "knowledge_cases": knowledge_cases
         }
 
     except json.JSONDecodeError as e:
@@ -221,14 +227,16 @@ async def resolve_issue(
         fallback = _get_fallback_response(issue, str(e))
         return {
             "resolution": fallback,
-            "updated_issue": issue  # 오류 시 원본 유지
+            "updated_issue": issue,  # 오류 시 원본 유지
+            "knowledge_cases": knowledge_cases
         }
     except Exception as e:
         logger.error(f"[IssueResolver] Error resolving issue: {e}")
         fallback = _get_fallback_response(issue, str(e))
         return {
             "resolution": fallback,
-            "updated_issue": issue  # 오류 시 원본 유지
+            "updated_issue": issue,  # 오류 시 원본 유지
+            "knowledge_cases": knowledge_cases
         }
 
 
