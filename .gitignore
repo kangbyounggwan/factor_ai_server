@@ -34,3 +34,7 @@ output/
 
 
 cura/
+
+# Knowledge base data (비공개 — 저장소에 올리지 않음)
+ontology_triples_kb*.json*
+*.kb.json.gz
