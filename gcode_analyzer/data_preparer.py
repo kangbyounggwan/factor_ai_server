@@ -2,6 +2,7 @@
 LLM 입력 데이터 준비 로직
 G-code 파서 + DB 데이터 + 컨텍스트 조합
 """
+import re
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from .models import GCodeLine, GCodeSummary, TempEvent
@@ -85,11 +86,13 @@ def detect_filament_from_gcode(lines: List[GCodeLine]) -> Optional[str]:
             # Cura, Prusa, etc. 다양한 형식 처리
             if "FILAMENT_TYPE" in comment or "FILAMENT TYPE" in comment:
                 for ftype in ["PLA", "ABS", "PETG", "TPU", "NYLON", "ASA"]:
-                    if ftype in comment:
+                    # 단어 경계로 찾는다 (summary.py 와 같은 이유)
+                    if re.search(rf"\b{ftype}\b", comment):
                         return ftype
-            # 간단한 패턴
+            # 간단한 패턴 — 파서가 ';' 를 떼고 comment 를 넘기므로
+            # 주석 앞부분이 재질명으로 시작하는 경우만 인정한다.
             for ftype in ["PLA", "ABS", "PETG", "TPU"]:
-                if f"; {ftype}" in line.comment.upper() or f";{ftype}" in line.comment.upper():
+                if re.match(rf"\s*{ftype}\b", comment):
                     return ftype
     return None
 

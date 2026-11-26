@@ -191,7 +191,12 @@ def summarize_gcode(lines: List[GCodeLine]) -> GCodeSummary:
         if line.comment:
             comment = line.comment.upper()
             for ftype in ["PLA", "ABS", "PETG", "TPU", "NYLON", "ASA"]:
-                if ftype in comment:
+                # 단어 경계로 찾는다. 부분문자열로 훑으면 슬라이서가 거의 모든
+                # 파일에 넣는 "absolute extrusion mode" 안의 ABS 를 필라멘트
+                # ABS 로 오인한다. 그러면 권장 온도가 180~230 에서 220~260 으로,
+                # 베드 최소가 50 에서 90 으로 바뀌어 정상 PLA 출력에
+                # 저온·베드부족 진단이 나간다.
+                if re.search(rf"\b{ftype}\b", comment):
                     detected_filament = ftype
                     break
             if detected_filament:
